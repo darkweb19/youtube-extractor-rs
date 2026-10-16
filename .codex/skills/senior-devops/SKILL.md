@@ -5,6 +5,12 @@ description: Comprehensive DevOps skill for CI/CD, infrastructure automation, co
 
 # Senior Devops
 
+> **Local adaptation:** Optional Python generators and deployment helpers are
+> intentionally omitted from this Rust repository. Tool commands below are
+> retained as upstream examples, not executable local steps. Maintain the existing
+> CI, Dockerfile, Railway configuration, and smoke scripts directly. This notice
+> takes precedence over instructions to run omitted helpers; do not reinstall them.
+
 Complete toolkit for senior devops with modern tools and best practices.
 
 ## Quick Start

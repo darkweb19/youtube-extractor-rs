@@ -11,6 +11,12 @@ metadata:
 
 # Docker Development
 
+> **Local adaptation:** Optional Python analyzers are intentionally omitted from
+> this Rust repository. Tool commands below are retained as upstream examples,
+> not executable local steps. Review Docker configuration directly and validate
+> it with the actual image build and maintained container smoke test. This notice
+> takes precedence over instructions to run omitted helpers; do not reinstall them.
+
 > Smaller images. Faster builds. Secure containers. No guesswork.
 
 Opinionated Docker workflow that turns bloated Dockerfiles into production-grade containers. Covers optimization, multi-stage builds, compose orchestration, and security hardening.

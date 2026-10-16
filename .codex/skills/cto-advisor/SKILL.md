@@ -8,11 +8,16 @@ metadata:
   category: c-level
   domain: cto-leadership
   updated: 2026-03-05
-  python-tools: tech_debt_analyzer.py, team_scaling_calculator.py
   frameworks: architecture-decisions, engineering-metrics, technology-evaluation
 ---
 
 # CTO Advisor
+
+> **Local adaptation:** Optional Python helpers are intentionally omitted from
+> this Rust repository. Tool commands below are retained as upstream examples,
+> not executable local steps. Perform the equivalent assessment manually and
+> record evidence, assumptions, and architecture decisions. This notice takes
+> precedence over instructions to run the omitted helpers; do not reinstall them.
 
 Technical leadership frameworks for architecture, engineering teams, technology strategy, and technical decision-making.
 

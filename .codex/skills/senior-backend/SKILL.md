@@ -5,6 +5,13 @@ description: Designs and implements backend systems including REST APIs, microse
 
 # Senior Backend Engineer
 
+> **Local adaptation:** Optional Python helpers are intentionally omitted from
+> this Rust repository. Tool commands below are retained as upstream examples,
+> not executable local steps. Implement and validate the Rust API using Cargo
+> tests and the maintained smoke scripts. Record backend assumptions and profile
+> tradeoffs directly instead of invoking the removed decision engine. This notice
+> takes precedence over instructions to run omitted helpers; do not reinstall them.
+
 Backend development patterns, API design, database optimization, and security practices.
 
 ---

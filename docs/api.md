@@ -1,6 +1,6 @@
 # HTTP API v1
 
-All versioned endpoints use `Authorization: Bearer <API_TOKEN>`. The token is a shared service credential; this release does not provide per-user ownership or multi-tenant authorization. Keep it server-side and terminate public connections with TLS. Signed media source URLs and internal paths are not part of the client API.
+All versioned endpoints use `Authorization: Bearer <API_TOKEN>`. The token is a shared service credential; this release does not provide per-user ownership or multi-tenant authorization. Keep it private and terminate public connections with TLS. The bundled single-operator web UI accepts the token directly in the browser and sends it only to same-origin API endpoints in Authorization headers, retaining it in memory for that tab. Do not use the shared-token UI for anonymous public access; use HTTPS and additional ingress access controls where appropriate. Signed media source URLs and internal paths are not part of the client API.
 
 `GET /health` is public and reports readiness. A successful response establishes that the local service prerequisites work; it does not contact YouTube or establish outbound compatibility. An unavailable local storage directory or FFmpeg returns `503`.
 

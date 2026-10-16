@@ -101,6 +101,48 @@ fn request(method: &str, path: &str, body: &str, authorized: bool) -> Request<Bo
     builder.body(Body::from(body.to_string())).unwrap()
 }
 #[tokio::test]
+async fn frontend_assets_are_public_but_api_credentials_remain_protected() {
+    let temp = tempfile::tempdir().unwrap();
+    let (app, jobs) = app(temp.path(), 120).await;
+    for (path, content_type, marker) in [
+        ("/", "text/html", "id=\"confirm-dialog\""),
+        ("/app.css", "text/css", ".confirm-dialog"),
+        ("/app.js", "text/javascript", "/api/v1/downloads"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request("GET", path, "", false))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert!(response.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with(content_type));
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        if path == "/" {
+            let csp = response.headers()["content-security-policy"]
+                .to_str()
+                .unwrap();
+            assert!(csp.contains("script-src 'self'"));
+            assert!(csp.contains("frame-src https://www.youtube-nocookie.com"));
+            assert!(csp.contains("media-src blob:"));
+        }
+        let body = to_bytes(response.into_body(), 65536).await.unwrap();
+        let text = std::str::from_utf8(&body).unwrap();
+        assert!(text.contains(marker), "{path}");
+        assert!(!text.contains(TOKEN), "{path} must not leak the bearer token");
+    }
+    // Serving a public HTML shell must not make the API anonymous.
+    let response = app
+        .oneshot(request("POST", "/api/v1/downloads", "{}", false))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    jobs.shutdown().await;
+}
+
+#[tokio::test]
 async fn every_v1_route_including_files_requires_authentication() {
     let temp = tempfile::tempdir().unwrap();
     let (app, jobs) = app(temp.path(), 120).await;

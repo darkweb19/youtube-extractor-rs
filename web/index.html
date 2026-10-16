@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f7fd">
+  <meta name="description" content="Preview an authorized YouTube video, then convert it to a downloadable MP4.">
+  <title>Frame | YouTube to MP4</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Frame, start again">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 36 36" fill="none"><rect x="3" y="3" width="30" height="30" rx="9" stroke="currentColor" stroke-width="2.5"/><path d="M14 10v16l13-8-13-8Z" fill="currentColor"/></svg>
+        </span>
+        <span>frame<span class="brand-period">.</span></span>
+      </a>
+      <div class="topbar-right"><span class="pulse" aria-hidden="true"></span><span>YOUR PRIVATE WORKSPACE</span></div>
+    </header>
+
+    <main class="shell">
+      <section class="intro" aria-labelledby="page-title">
+        <div class="kicker"><span class="kicker-dash"></span> THE VIDEO WORKSPACE <span class="kicker-number">/ 001</span></div>
+        <h1 id="page-title">Your video.<br><span>Ready to keep.</span></h1>
+        <p>Paste a YouTube link, confirm the right video, and make a downloadable MP4. One clear step at a time.</p>
+      </section>
+
+      <div class="workspace">
+        <section class="panel source-panel" aria-labelledby="source-title">
+          <div class="panel-heading"><span class="step-index">01</span><span class="heading-copy"><span class="overline">START HERE</span><h2 id="source-title">Choose your video</h2></span></div>
+          <form id="source-form" novalidate>
+            <label for="youtube-url" class="field-label">YouTube video link</label>
+            <div class="input-shell">
+              <span class="input-leading" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none"><path d="M10.5 13.5a4.4 4.4 0 0 0 6.2 0l3.1-3.1a4.4 4.4 0 0 0-6.2-6.2l-1.8 1.8M13.5 10.5a4.4 4.4 0 0 0-6.2 0l-3.1 3.1a4.4 4.4 0 0 0 6.2 6.2l1.8-1.8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+              </span>
+              <input id="youtube-url" type="url" placeholder="https://youtube.com/watch?v=..." inputmode="url" autocomplete="url" spellcheck="false" maxlength="2048" aria-describedby="url-help" required>
+            </div>
+            <p id="url-help" class="field-help">Supports YouTube, youtu.be, and Shorts links.</p>
+
+            <details class="access-settings" id="access-settings">
+              <summary><span class="summary-icon" aria-hidden="true">✳</span> Private API access <span class="access-tag">REQUIRED FOR GENERATION</span><span class="chevron" aria-hidden="true">⌄</span></summary>
+              <div class="access-body">
+                <label for="api-token" class="field-label">API access token</label>
+                <input id="api-token" class="token-input" type="password" placeholder="Paste your Railway API_TOKEN" autocomplete="off" spellcheck="false">
+                <p class="field-help">Your token stays in this browser tab's memory. It is never saved or included in the page source.</p>
+              </div>
+            </details>
+
+            <button class="primary-button" id="preview-button" type="submit">
+              <span>Generate MP4</span>
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 12h16m-7-7 7 7-7 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <p class="permission-note"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3 4 7v5c0 5 3.4 8.5 8 9 4.6-.5 8-4 8-9V7l-8-4Z" stroke="currentColor" stroke-width="1.5"/><path d="m9 12 2 2 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg> Only download videos you have permission to save.</p>
+          </form>
+        </section>
+
+        <section class="panel result-panel" aria-labelledby="result-title">
+          <div class="panel-heading panel-heading-right"><span class="step-index">02</span><span class="heading-copy"><span class="overline">YOUR OUTPUT</span><h2 id="result-title">The finished file</h2></span><span id="stage-pill" class="stage-pill" data-stage="idle">WAITING</span></div>
+          <div id="empty-state" class="empty-state">
+            <div class="empty-art" aria-hidden="true">
+              <div class="empty-orbit orbit-one"></div><div class="empty-orbit orbit-two"></div>
+              <div class="empty-icon"><svg viewBox="0 0 80 80" fill="none"><rect x="13" y="20" width="54" height="40" rx="11" stroke="currentColor" stroke-width="2.5"/><path d="m34 31 18 9-18 9V31Z" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round"/></svg></div>
+            </div>
+            <h3>A place for your next video.</h3>
+            <p>Your MP4 will appear here when it's ready. Start by adding a link on the left.</p>
+          </div>
+          <div id="working-state" class="working-state" hidden>
+            <div class="work-icon"><span class="spinner" aria-hidden="true"></span></div>
+            <h3 id="work-heading">Preparing your video</h3>
+            <p id="work-description">Your request is being processed.</p>
+            <div class="progress-area" id="progress-area" hidden>
+              <div class="progress-label"><span>Download progress</span><span id="progress-number">0%</span></div>
+              <progress id="job-progress" max="100" value="0">0%</progress>
+            </div>
+            <button type="button" class="subtle-button" id="cancel-button" hidden>Cancel generation</button>
+          </div>
+          <div id="success-state" class="success-state" hidden>
+            <div class="success-heading"><span class="success-check" aria-hidden="true">✓</span><div><span class="overline">DOWNLOAD COMPLETE</span><h3>Your MP4 is ready.</h3></div></div>
+            <video id="result-video" class="result-video" controls playsinline preload="metadata" aria-label="Generated MP4 preview"></video>
+            <div class="file-row"><div><strong id="file-name">video.mp4</strong><span id="file-size">MP4 video</span></div><span class="file-extension">.MP4</span></div>
+            <a id="download-link" class="download-button" href="#" download="video.mp4"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 17v3h16v-3" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg> Download MP4</a>
+            <button type="button" class="new-video" id="new-video-button">Generate another video <span aria-hidden="true">↗</span></button>
+          </div>
+          <div id="error-state" class="error-state" hidden>
+            <span class="error-glyph" aria-hidden="true">!</span>
+            <h3>We couldn't finish this video.</h3>
+            <p id="error-description">Check the error and try a different video.</p>
+            <button class="secondary-button" type="button" id="retry-button">Try again</button>
+          </div>
+        </section>
+      </div>
+
+      <section class="process" aria-label="How it works">
+        <div class="process-title">HOW IT WORKS <span class="process-line" aria-hidden="true"></span></div>
+        <ol class="process-steps">
+          <li><span class="process-num">01</span><span>Paste a link</span><small>Choose your source</small></li>
+          <li><span class="process-num">02</span><span>Confirm the video</span><small>Preview before generating</small></li>
+          <li><span class="process-num">03</span><span>Keep the MP4</span><small>Play or download</small></li>
+        </ol>
+      </section>
+    </main>
+
+    <footer class="footer"><span>FRAME / VIDEO TO FILE</span><span>A SIMPLE TOOL FOR VIDEOS YOU'RE ALLOWED TO KEEP.</span></footer>
+  </div>
+
+  <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-help">
+    <div class="dialog-top"><div><span class="overline">STEP 02 / CONFIRM SOURCE</span><h2 id="confirm-title">Is this the right video?</h2></div><button class="icon-button" type="button" id="close-dialog" aria-label="Close preview">×</button></div>
+    <div class="embed-wrap"><iframe id="youtube-preview" title="YouTube video confirmation preview" referrerpolicy="strict-origin-when-cross-origin" allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe></div>
+    <p id="confirm-help" class="dialog-help">Check the preview before you start. You can also <a id="open-youtube" href="#" target="_blank" rel="noopener noreferrer">open this video on YouTube</a> if playback is unavailable here.</p>
+    <div class="dialog-actions"><button class="secondary-button" type="button" id="back-button">Go back</button><button class="primary-button" type="button" id="continue-button">Continue to generate <span aria-hidden="true">→</span></button></div>
+  </dialog>
+
+  <div class="toast-region" id="toast-region" role="region" aria-label="Notifications" aria-live="polite" aria-atomic="false"></div>
+</body>
+</html>

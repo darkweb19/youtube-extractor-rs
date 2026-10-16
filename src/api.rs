@@ -66,9 +66,46 @@ pub fn router(state: ApiState) -> Router {
         .layer(DefaultBodyLimit::max(16 * 1024))
         .route_layer(middleware::from_fn_with_state(state.clone(), protect));
     Router::new()
+        .route("/", get(frontend_page))
+        .route("/app.css", get(frontend_css))
+        .route("/app.js", get(frontend_js))
         .route("/health", get(health))
         .merge(protected)
         .with_state(state)
+}
+// The operator UI is served without a JavaScript build tool, and does not
+// embed or expose the server's API_TOKEN. All v1 API calls remain bearer-protected.
+async fn frontend_page() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::REFERRER_POLICY, "strict-origin-when-cross-origin"),
+            (header::CONTENT_SECURITY_POLICY, "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; media-src blob:; frame-src https://www.youtube-nocookie.com; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'"),
+        ],
+        include_str!("../web/index.html"),
+    )
+}
+async fn frontend_css() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        include_str!("../web/app.css"),
+    )
+}
+async fn frontend_js() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        include_str!("../web/app.js"),
+    )
 }
 async fn protect(State(state): State<ApiState>, request: Request, next: Next) -> Response {
     if let Some(expected) = &state.config.api_token {

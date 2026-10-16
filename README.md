@@ -8,6 +8,17 @@ This is an initial implementation with a deliberately limited protocol surface. 
 
 See [protocol support](docs/protocol-support.md) for the exact supported parser and stream surface, JavaScript evaluation decision and manifest roadmap.
 
+## Browser interface
+
+Open the service root at `https://YOUR-RAILWAY-DOMAIN/`. The bundled, responsive browser UI provides a two-step workflow:
+
+1. Paste a normal YouTube/watch/Shorts link and select **Generate MP4**. The first step opens a privacy-enhanced YouTube player for confirmation only; no extraction job is created.
+2. Choose **Continue to generate**. The UI submits an authenticated MP4 job, polls its state, displays bounded progress when available, and finally loads the authenticated file as a temporary browser blob for playback and a **Download MP4** button. Backend and network failures appear as toasts and a persistent error panel; users can cancel queued/running jobs.
+
+The API remains bearer-protected, including completed files. Enter your existing `API_TOKEN` in **Private API access** on the page. The UI retains it only in the current tab's memory; it is not baked into HTML/JavaScript, saved to local storage, or transmitted to YouTube. Use this interface only as a trusted single-operator tool on HTTPS. Anyone who knows the shared token can operate all jobs: **do not post the token publicly or use this UI as an anonymous public downloader**. Consider additional edge access controls for an exposed Railway domain.
+
+Authenticated video preview downloads the MP4 into a browser Blob because a native `<video>` element cannot attach the required bearer header. For large files, this uses significant browser memory and bandwidth; keep the tab open while the job runs. The MP4 and its local job record expire according to `JOB_TTL_SECS`. The YouTube confirmation player is a separate third-party embed and may itself be unavailable for restricted videos. Neither preview nor a healthy API confirms that Railway's outbound IP is allowed to extract a YouTube video.
+
 ## Usage
 
 ### Run locally

@@ -4,6 +4,7 @@ ARG CARGO_BUILD_JOBS=3
 WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src ./src
+COPY web ./web
 # Use standard Docker build steps for compatibility with Railway's Dockerfile parser.
 RUN set -eu; \
     CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" cargo build --locked --release; \

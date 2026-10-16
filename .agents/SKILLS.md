@@ -10,7 +10,7 @@ These five skills were copied from [darkweb19/skills](https://github.com/darkweb
 | `senior-devops` | CI/CD and deployment |
 | `adversarial-reviewer` | Critical reviews of changes before merge |
 
-The **source-of-truth copies** live under `.codex/skills/<skill>/` as requested. Codex's repository discovery directory is `.agents/skills/`, so that directory contains relative symlinks to the canonical copies. Do not delete or flatten these links.
+Each skill lives directly in `.agents/skills/<skill>/`, with its `SKILL.md` entry point and any supporting references or profiles. This is the standard Codex repository skill discovery path and the single canonical location for these skills.
 
 These are guidance-only skill copies. Upstream examples that mention Python helper scripts describe tools available in the linked upstream repository, not this checkout. Do not run missing helpers or reinstall them automatically. Apply the documented checks directly using this project's Rust tools, Cargo tests, Docker build, and maintained smoke scripts. Backend decisions should record assumptions and tradeoffs directly rather than invoking the removed decision engine.
 

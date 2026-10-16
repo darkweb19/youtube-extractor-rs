@@ -14,7 +14,7 @@ Avoid unauthorized downloading and circumvention of DRM, CAPTCHA, authentication
 
 ## Local skills
 
-Use `cto-advisor`, `senior-backend`, `docker-development`, `senior-devops`, and `adversarial-reviewer` when appropriate. Actual copies are in `.codex/skills`; Codex-discoverable symlinks are in `.agents/skills`. See `.codex/SKILLS.md`.
+Use `cto-advisor`, `senior-backend`, `docker-development`, `senior-devops`, and `adversarial-reviewer` when appropriate. Repository skills live directly in `.agents/skills/<skill>/SKILL.md`, the standard Codex discovery path. See `.agents/SKILLS.md` for the catalog and source attribution.
 
 ## Git workflow
 

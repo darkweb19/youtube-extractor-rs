@@ -1,0 +1,12 @@
+.git
+.github
+.codex
+.agents
+target
+data
+.env
+.env.*
+!.env.example
+*.log
+*.part
+attachments

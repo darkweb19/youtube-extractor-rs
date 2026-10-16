@@ -131,7 +131,10 @@ async fn frontend_assets_are_public_but_api_credentials_remain_protected() {
         let body = to_bytes(response.into_body(), 65536).await.unwrap();
         let text = std::str::from_utf8(&body).unwrap();
         assert!(text.contains(marker), "{path}");
-        assert!(!text.contains(TOKEN), "{path} must not leak the bearer token");
+        assert!(
+            !text.contains(TOKEN),
+            "{path} must not leak the bearer token"
+        );
     }
     // Serving a public HTML shell must not make the API anonymous.
     let response = app

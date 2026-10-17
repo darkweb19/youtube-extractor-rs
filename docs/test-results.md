@@ -1,5 +1,40 @@
 # Verification results
 
+## Public frontend verification — 2026-10-17
+
+The public browser generator was checked with Rust 1.99.1, Node.js 24.19.0,
+Chromium, FFmpeg and the committed Cargo/npm lockfiles in the managed Linux
+environment. Production remains the Rust binary with embedded HTML/CSS/JavaScript;
+Node.js and Playwright are development tools only.
+
+| Check | Result | Evidence and limits |
+| --- | --- | --- |
+| Formatting, Clippy and native build | Passed | `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets -- -D warnings`, `cargo build --locked` |
+| `cargo test --locked --all-targets` | Passed | 49 tests: 31 library, 4 API, 3 selection, 4 media/storage, 7 web. One external metadata probe remains ignored by default. |
+| Frontend syntax and browser tests | Passed | `npm run check:frontend`; 19 tests passed with `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium npm run test:frontend` |
+| Browser interaction and accessibility | Passed | Preview before submission, Continue exactly once, Cancel/Escape, modal focus trap and restoration, no-JS prerequisite, progress, reload recovery, errors/retries, 375px layout, 200% zoom and reduced motion |
+| Generated-file UI | Passed with controlled media | An actual synthetic MP4 plays in Chromium; downloaded bytes match the fixture and FFprobe confirms audio/video. HTTP job responses and YouTube player transport are controlled fixtures. |
+| Rust web integration | Passed | Session/CSRF/origin checks, ownership isolation, URL validation, public/private access separation, range/HEAD media delivery and bounded admission. The corrected HEAD capacity-release regression also passed five repeated focused runs. |
+| Packaged service in Chromium | Passed | Actual Docker-hosted Rust page/assets load under its CSP; anonymous HttpOnly session, preview without POST, real job acceptance, structured `NETWORK` error toast, other-session 404 and private API 401. No bearer headers, CSP violations or uncaught exceptions observed. Only the external player transport was controlled. |
+| Multi-stage Docker build and container smoke | Passed | Embedded assets packaged successfully; health, non-root runtime, FFmpeg, authentication, destination validation and missing-token startup refusal |
+| Premium UI strict audit | Passed | Zero findings; design metadata lint has zero errors and 14 nonblocking orphan-token warnings |
+| Live YouTube generation / Railway deployment | Unverified | The environment's YouTube network restriction remains unresolved; fixture playback and honest network-error handling do not prove successful extraction or deployment. |
+
+Frontend image: `sha256:1fd258fcb5e7df9c29984ae91675964a2c9eece69012f8013ca141cc4b872da0`
+(547,591,043 bytes uncompressed). This local image was not published or deployed.
+Browser screenshots and the fixture MP4 are local verification artifacts under
+`/tmp/frontend-artifacts/`, rather than committed production assets.
+
+The API bearer token stays server-side. Public visitors can generate and access
+their own browser jobs without signing in. Production HTTPS requires
+`UI_SECURE_COOKIES=true`; browser ownership is process-local and expires after
+one hour of inactivity. Native attachment failures after the availability check
+are handled by the browser's download manager. See the
+[frontend review](frontend-review.md), [browser API contract](api.md), and
+[deployment guidance](deployment.md) for these operational limits.
+
+## Initial service verification — 2026-10-16
+
 Verified on 2026-10-16 in the managed Linux x86_64 development environment, with
 Rust 1.99.1 and the committed dependency lockfile. These results describe this
 implementation and the local container, not an approved production release.

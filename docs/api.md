@@ -69,3 +69,41 @@ Errors use JSON with a stable code and a safe message:
 | `500` | `FFMPEG_FAILED`, `STORAGE`, `INTERNAL` |
 
 A job can be accepted and fail later; inspect its `error` rather than treating `202` as successful extraction. Do not retry access restrictions in a loop. Queue pressure and transient network errors may be retried with bounded client backoff. No callback or webhook fields are currently accepted or delivered.
+
+## Public browser workflow
+
+The page at `/` is public when `FRONTEND_ENABLED=true` (the default). Its static
+assets are embedded in the Rust binary. The public page never receives the
+private API bearer token and does not call `/api/v1` from browser JavaScript.
+The versioned API authentication rules above still apply.
+
+The browser obtains an anonymous HttpOnly, SameSite=Strict cookie and a separate
+CSRF value through `GET /ui/session`. Mutations send the CSRF value in
+`X-CSRF-Token`; cross-origin browser requests are rejected. These routes use the
+same bounded request/worker/storage capacity as the authenticated API:
+
+| Method | Route | Behavior |
+| --- | --- | --- |
+| `GET` | `/ui/session` | Create or refresh an anonymous browser session; return `csrf_token` |
+| `POST` | `/ui/downloads` | Create a video/MP4 job using the request schema above; CSRF required |
+| `GET` | `/ui/downloads/{job_id}` | Read a job owned by this browser session |
+| `GET`, `HEAD` | `/ui/downloads/{job_id}/media` | Inline MP4 playback, with single byte-range support |
+| `GET`, `HEAD` | `/ui/downloads/{job_id}/file` | MP4 attachment; HEAD checks availability without downloading bytes |
+| `DELETE` | `/ui/downloads/{job_id}` | Cancel/delete an owned job; CSRF required |
+
+Browser job responses have the normal job fields plus `media_url`, and their
+`download_url` points to the `/ui` attachment route. Both URLs require the
+browser's cookie. Other sessions and privately created API jobs are inaccessible
+through this interface, even if their IDs are known. Browser responses and assets
+use `Cache-Control: no-store`.
+
+Sessions expire after one hour of inactivity. Anonymous ownership is process-local
+and ends on restart; retained jobs/files can still be accessed by an authorized
+operator through `/api/v1`. A failed or expired browser session must be refreshed
+explicitly, without automatically resubmitting a generation request.
+
+Set `UI_SECURE_COOKIES=true` for HTTPS deployments, and configure an exact
+`UI_PUBLIC_ORIGIN` if a reverse proxy rewrites Host. Set `FRONTEND_ENABLED=false`
+to remove the browser page, assets and `/ui` endpoints while retaining the API.
+See [ADR 0002](adr/0002-public-browser-generator.md) and the
+[frontend review](frontend-review.md) for the security boundary and limits.

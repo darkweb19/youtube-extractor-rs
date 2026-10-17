@@ -10,6 +10,31 @@ See [protocol support](docs/protocol-support.md) for the exact supported parser 
 
 ## Usage
 
+### Public web interface
+
+Open the service origin in your browser, for example `http://localhost:8080` when
+running locally. The frontend is served by the Rust binary; no separate frontend
+server or Node.js production runtime is needed.
+
+1. Paste a YouTube video link and select **Generate MP4**.
+2. Check the YouTube player in the confirmation modal. Select **Continue to
+   generate** to start the actual job, or Cancel to return without starting it.
+3. Wait for generation progress. On success, the page shows the generated MP4
+   player, a success message, and **Download MP4**.
+4. Backend, connection, playback and download availability errors appear in a
+   toast with persistent recovery guidance where needed. Once a native download
+   starts, your browser's download manager reports interrupted file transfers.
+
+The page is intentionally public. Anonymous browser sessions can generate videos
+and access their own jobs; `/api/v1` still requires the server's `API_TOKEN`.
+The token is never bundled into browser JavaScript. Cookies must be enabled.
+Generated files expire, and restarting the service ends anonymous browser access
+to previous jobs. Download a completed file while your session is available.
+
+For HTTPS hosting, set `UI_SECURE_COOKIES=true`. Set `FRONTEND_ENABLED=false`
+to disable the public page and browser routes for an API-only deployment. Public
+traffic uses the same bounded job, request and storage capacity as API clients.
+
 ### Run locally
 
 Install the Rust toolchain pinned in `rust-toolchain.toml` and FFmpeg (`ffmpeg` and `ffprobe` on `PATH`). The HTTP examples below also use `curl` and `jq`.
@@ -118,6 +143,7 @@ curl --fail --silent --show-error --request DELETE \
 
 1. Create a **separate service** from this GitHub repository and select the reviewed branch/commit. Keep the repository root as the build root. The supplied `railway.toml` selects the Dockerfile, `/health`, restart policy, and one replica. Let the Docker image's entry point start the service.
 2. Set `API_TOKEN` to a strong random secret, `ALLOW_UNAUTHENTICATED=false`, and `DATA_DIR=/data` in service variables. Railway supplies `PORT`; the application listens on `0.0.0.0:$PORT`.
+   Set `UI_SECURE_COOKIES=true` for the public HTTPS frontend. If the proxy rewrites Host, set `UI_PUBLIC_ORIGIN` to the exact HTTPS origin without a trailing slash. Leave `FRONTEND_ENABLED=true` for the public generator, or set it false for API-only use.
 3. Attach a persistent volume at `/data`, sized above the configured storage budget with room for filesystem overhead (for example, 10 GiB for the default 8 GiB logical budget). Ensure UID/GID `10001:10001` can write it using the platform's supported volume initialization process. The application runs as that non-root user.
 4. Keep **one replica**. Jobs and files use local volume state; replicas do not share a queue or job namespace. Start with roughly 2 CPU cores and 2 GiB RAM for two workers, then measure your workload and apply hard resource limits. These are starting estimates, not measured production guarantees.
 5. Expose an HTTPS domain or use private service networking. Keep the bearer token in the consuming backend's secret settings. Set the health-check path to `/health`, and verify that a `POST /api/v1/videos/info` request without an authorization header returns `401`.
@@ -177,6 +203,9 @@ Check volume permissions for UID/GID `10001:10001` on every platform. Diskless o
 | --- | --- | --- |
 | `API_TOKEN` | required | Same secret for every authenticated route, including files; at least 32 visible ASCII characters |
 | `ALLOW_UNAUTHENTICATED` | `false` | Keep false in production |
+| `FRONTEND_ENABLED` | `true` | Public browser generator at `/`; false disables its page and `/ui` routes |
+| `UI_SECURE_COOKIES` | `false` | Set true for HTTPS hosting; false permits local HTTP development |
+| `UI_PUBLIC_ORIGIN` | unset | Exact public origin if a reverse proxy rewrites Host |
 | `PORT` | `8080` | Use the provider's assigned port, or route to 8080 |
 | `DATA_DIR` | `data`; image: `/data` | Mount persistent writable storage here |
 | `WORKERS` / `QUEUE_CAPACITY` | `2` / `16` | Concurrent jobs / maximum waiting jobs |
@@ -197,6 +226,21 @@ The storage budget can reject admission before the queue fills. A remux usually 
 | `QUEUE_FULL` / `RATE_LIMITED` | Worker, queue, storage, retention, and request-rate limits; back off before retrying |
 
 ## Development and verification
+
+Browser checks use Node.js 22+ and a dev-only Playwright dependency. This tooling
+is not needed to start the Rust service or included in the production image:
+
+```bash
+npm ci --ignore-scripts
+npx playwright install chromium
+npm run check:frontend
+npm run test:frontend
+```
+
+When using an installed Chromium instead of Playwright's downloaded browser,
+set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to its executable path. Browser tests use
+controlled HTTP responses and synthetic media; they do not establish live YouTube
+compatibility.
 
 ```bash
 cargo fmt --all -- --check

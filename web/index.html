@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="description" content="Preview a YouTube video, generate an MP4, and download your file.">
+    <title>Frame — YouTube to MP4</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+    <script type="module" src="/assets/app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to converter</a>
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="Frame home"><span class="brand-mark" aria-hidden="true"></span>frame<span class="brand-dot" aria-hidden="true">.</span></a>
+      <span class="header-caption">YouTube → MP4</span>
+    </header>
+    <main id="main" class="workspace">
+      <section class="intro" aria-labelledby="page-title">
+        <p class="eyebrow"><span aria-hidden="true" class="status-dot"></span> A little less between you and your video</p>
+        <h1 id="page-title">From link<br> to <span class="headline-file">MP4<span class="file-corner" aria-hidden="true"></span></span>.</h1>
+        <p class="intro-copy">Paste a YouTube link. Check the video.<br> Generate a file you can keep.</p>
+      </section>
+      <section class="converter" aria-label="YouTube video converter">
+        <div class="converter-topline"><span class="section-label">Your video starts here</span><span class="format-label">.MP4</span></div>
+        <form id="url-form" novalidate>
+          <label for="youtube-url">YouTube link</label>
+          <div class="input-row">
+            <div class="input-wrap">
+              <svg class="input-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m10 13 4-4m-6 6-1.5 1.5a3.54 3.54 0 0 1-5-5L6 7a3.54 3.54 0 0 1 5 0m2 10a3.54 3.54 0 0 0 5 0l4.5-4.5a3.54 3.54 0 0 0-5-5L16 9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+              <input id="youtube-url" name="url" type="url" inputmode="url" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="https://www.youtube.com/watch?v=…" aria-describedby="url-help url-error" required>
+            </div>
+            <button id="generate-button" class="button button-primary" type="submit" disabled><span>Generate MP4</span><svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 12h14m-6-6 6 6-6 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          </div>
+          <p id="url-error" class="field-error"></p>
+          <p id="url-help" class="field-help">You'll preview the video before generation starts.</p>
+          <p id="session-status" class="session-status" role="status">Connecting to the converter…</p>
+        </form>
+        <div id="inline-error" class="notice notice-error" hidden><span class="notice-icon" aria-hidden="true">!</span><div><p id="error-message"></p><button id="retry-status" class="text-button" type="button" hidden disabled>Check status again</button><button id="refresh-session" class="text-button" type="button" hidden disabled>Start a new session</button></div></div>
+        <section id="job-panel" class="job-panel" aria-labelledby="job-heading" hidden>
+          <div class="job-heading-row"><div><p class="section-label">Generation</p><h2 id="job-heading">Preparing your MP4</h2></div><span id="job-phase" class="phase-label">Queued</span></div>
+          <progress id="job-progress" max="100" aria-label="Video generation progress"></progress>
+          <div class="progress-detail"><p id="job-status" role="status">Waiting to start…</p><button id="cancel-job" type="button" class="text-button" disabled>Cancel generation</button></div>
+        </section>
+        <section id="result-panel" class="result-panel" aria-labelledby="result-heading" hidden>
+          <div class="success-heading"><span class="success-icon" aria-hidden="true">✓</span><div><p class="section-label">Ready when you are</p><h2 id="result-heading">Your MP4 is ready.</h2></div></div>
+          <div class="result-media"><video id="result-video" controls playsinline preload="metadata" aria-label="Generated MP4 video"></video></div>
+          <div class="result-bottom"><p id="file-details">MP4 video</p><a id="download-button" class="button button-primary" download><svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v12m-4-4 4 4 4-4M5 16v4h14v-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Download MP4</span></a></div>
+          <p class="retention-note">Download your file now. Generated files are kept temporarily.</p>
+        </section>
+        <div id="empty-state" class="empty-state" aria-hidden="true"><div class="film-frame"><div class="play-mark"></div><span class="frame-corner corner-tl"></span><span class="frame-corner corner-tr"></span><span class="frame-corner corner-bl"></span><span class="frame-corner corner-br"></span></div><p>A link. A preview. Your video.</p></div>
+      </section>
+      <footer class="workspace-footer"><p>Only download videos you own or have permission to save.</p><span>Preview → Confirm → Download</span></footer>
+    </main>
+    <dialog id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-description">
+      <div class="dialog-content"><div class="dialog-header"><div><p class="section-label">Before you generate</p><h2 id="confirm-title">Is this the right video?</h2></div><button id="close-preview" class="icon-button" type="button" aria-label="Close video preview" disabled>×</button></div>
+      <p id="confirm-description">Check the video below, then continue to generate your MP4.</p>
+      <div id="preview-container" class="preview-container"></div>
+      <div id="preview-error" class="notice notice-error" hidden><span class="notice-icon" aria-hidden="true">!</span><p id="preview-error-message"></p></div>
+      <div class="preview-meta"><span id="preview-id"></span><a id="watch-link" target="_blank" rel="noopener noreferrer">Open on YouTube <span aria-hidden="true">↗</span></a></div>
+      <div class="dialog-actions"><button id="cancel-preview" class="button button-neutral" type="button" disabled>Cancel</button><button id="continue-button" class="button button-primary" type="button" disabled>Continue to generate <span aria-hidden="true">→</span></button></div></div>
+    </dialog>
+    <div id="toast-region" class="toast-region" role="status" aria-live="polite" aria-atomic="true"></div>
+    <noscript><p class="noscript">Enable JavaScript to preview and generate your video.</p></noscript>
+  </body>
+</html>

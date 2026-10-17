@@ -1,0 +1,29 @@
+name: Browser checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npx playwright install --with-deps chromium
+      - name: Install deterministic media fixture prerequisite
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends ffmpeg
+      - run: npm run check:frontend
+      - run: npm run test:frontend
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frontend-browser-artifacts
+          path: /tmp/frontend-artifacts/
+          if-no-files-found: ignore

@@ -1,0 +1,24 @@
+{
+  "profile": "product-admin",
+  "sourceRoots": ["web"],
+  "locale": "en",
+  "canonicalMap": "UX-CONTRACT.md",
+  "requiredCapabilities": ["Form", "Scrollbar", "Toast", "CRUD"],
+  "ownership": {
+    "Form": "authored",
+    "Scrollbar": "global stylesheet",
+    "Toast": "authored",
+    "CRUD": "server session bridge"
+  },
+  "requiredCommands": ["syntax", "browser"],
+  "commands": {
+    "syntax": "npm run check:frontend",
+    "browser": "npm run test:frontend"
+  },
+  "evidence": {
+    "crudFullFlow": "tests/frontend/browser.test.mjs",
+    "failurePaths": "tests/frontend/browser.test.mjs",
+    "urlValidation": "tests/frontend/url.test.mjs",
+    "serverOwnership": "tests/web.rs"
+  }
+}

@@ -2,6 +2,9 @@
 .github
 .agents
 target
+node_modules
+playwright-report
+test-results
 data
 .env
 .env.*

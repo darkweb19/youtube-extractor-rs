@@ -7,13 +7,22 @@ backend, downloader executable, or third-party YouTube extraction engine is used
 
 ## Workload and reliability assumptions
 
-The initial service trusts one owning application represented by a shared bearer
-token. All authenticated callers can inspect and cancel all jobs. It is not a
-shared multi-tenant API: tenant isolation requires separate credentials,
-ownership checks, and storage partitioning before exposing it to unrelated users.
+The `/api/v1` interface trusts one owning application represented by a shared
+bearer token. All authenticated API callers can inspect and cancel all jobs.
+The public frontend at `/` uses separate `/ui` routes with anonymous-session job
+ownership; it never receives the API bearer token. Browser callers can access
+only jobs created by their own session. This is not a shared multi-tenant API:
+account-based tenancy still requires separate credentials and isolation.
 Public media is the intended content tier. API credentials, signed upstream
 URLs, and private job metadata are internal data and must not enter responses or
 logs. The caller remains responsible for authorization to download each video.
+
+The public frontend is enabled by default at the user's request. Set
+`FRONTEND_ENABLED=false` for an API-only deployment. Browser sessions and their
+job-ownership map are bounded and held in memory; a restart or session expiry
+ends browser access to old jobs even when their API records/files survive on the
+volume. Public and private callers share the same worker, request, retention and
+disk budgets. See [ADR 0002](adr/0002-public-browser-generator.md) for this boundary.
 
 There is no measured read/write ratio or one-year p99 QPS forecast yet. Metadata
 lookups run synchronously; downloads are asynchronous. The initial limits are
@@ -49,6 +58,7 @@ before horizontally scaling one shared job namespace.
 | Module | Responsibility |
 | --- | --- |
 | `api` | Versioned HTTP contract, authentication, request validation and limits, file delivery |
+| `web` | Embedded browser assets, anonymous sessions, CSRF/origin checks, job ownership and range-capable MP4 delivery |
 | `config` | Startup validation of secrets, timeouts, concurrency and retention budgets |
 | `error` | Stable machine error codes and JSON error responses |
 | `model` | Public metadata, requests, formats, and job response types |

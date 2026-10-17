@@ -7,9 +7,9 @@ use crate::{
     model::{DownloadRequest, JobError, JobProgress, JobState, JobView, OutputInfo},
 };
 use axum::{
-    body::Body,
+    body::{Body, HttpBody},
     extract::{rejection::JsonRejection, DefaultBodyLimit, Path, Request, State},
-    http::{header, HeaderValue, StatusCode},
+    http::{header, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -55,6 +55,7 @@ impl ApiState {
     }
 }
 pub fn router(state: ApiState) -> Router {
+    let browser = crate::web::router(state.clone());
     let protected = Router::new()
         .route("/api/v1/videos/info", post(video_info))
         .route("/api/v1/downloads", post(create_download))
@@ -69,6 +70,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/health", get(health))
         .merge(protected)
         .with_state(state)
+        .merge(browser)
 }
 async fn protect(State(state): State<ApiState>, request: Request, next: Next) -> Response {
     if let Some(expected) = &state.config.api_token {
@@ -83,6 +85,10 @@ async fn protect(State(state): State<ApiState>, request: Request, next: Next) ->
                 .into_response();
         }
     }
+    admit(state, request, next).await
+}
+pub(crate) async fn admit(state: ApiState, request: Request, next: Next) -> Response {
+    let head = request.method() == Method::HEAD;
     {
         let mut rate = match state.rate.lock() {
             Ok(rate) => rate,
@@ -110,30 +116,41 @@ async fn protect(State(state): State<ApiState>, request: Request, next: Next) ->
     match tokio::time::timeout(state.config.request_timeout, next.run(request)).await {
         Ok(mut response) => {
             let body = std::mem::replace(response.body_mut(), Body::empty());
-            let (sender, receiver) = tokio::sync::mpsc::channel(1);
-            let deadline = tokio::time::Instant::now() + state.config.download_timeout;
-            // A bounded producer owns file leases and the concurrency permit.
-            // Its independent deadline fires even when Hyper stops polling a stalled socket.
-            tokio::spawn(async move {
-                let _permit = permit;
-                let mut stream = body.into_data_stream();
-                loop {
-                    let chunk = tokio::select! {
-                        _ = tokio::time::sleep_until(deadline) => break,
-                        _ = sender.closed() => break,
-                        chunk = stream.next() => chunk,
-                    };
-                    let Some(chunk) = chunk else { break };
-                    tokio::select! {
-                        _ = tokio::time::sleep_until(deadline) => break,
-                        result = sender.send(chunk) => { if result.is_err() { break; } }
+            if head || body.is_end_stream() {
+                // HEAD and 204 responses must release admission immediately:
+                // Hyper may never poll their bodies or schedule a producer.
+                *response.body_mut() = if head { Body::empty() } else { body };
+                drop(permit);
+            } else {
+                let (sender, receiver) = tokio::sync::mpsc::channel(1);
+                let deadline = tokio::time::Instant::now() + state.config.download_timeout;
+                // A bounded producer owns file leases and the concurrency permit.
+                // Its independent deadline fires even when Hyper stops polling a stalled socket.
+                tokio::spawn(async move {
+                    let mut stream = body.into_data_stream();
+                    loop {
+                        let chunk = tokio::select! {
+                            _ = tokio::time::sleep_until(deadline) => break,
+                            _ = sender.closed() => break,
+                            chunk = stream.next() => chunk,
+                        };
+                        let Some(chunk) = chunk else { break };
+                        tokio::select! {
+                            _ = tokio::time::sleep_until(deadline) => break,
+                            result = sender.send(chunk) => { if result.is_err() { break; } }
+                        }
                     }
-                }
-            });
-            *response.body_mut() = Body::from_stream(futures_util::stream::unfold(
-                receiver,
-                |mut receiver| async move { receiver.recv().await.map(|chunk| (chunk, receiver)) },
-            ));
+                    // EOF can wake a follow-up request immediately. Release file
+                    // leases and admission before making that EOF observable.
+                    drop(stream);
+                    drop(permit);
+                    drop(sender);
+                });
+                *response.body_mut() = Body::from_stream(futures_util::stream::unfold(
+                    receiver,
+                    |mut receiver| async move { receiver.recv().await.map(|chunk| (chunk, receiver)) },
+                ));
+            }
             response
                 .headers_mut()
                 .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -211,7 +228,7 @@ fn health_response(ready: bool) -> Response {
 struct InfoRequest {
     url: String,
 }
-fn json_error(error: JsonRejection) -> AppError {
+pub(crate) fn json_error(error: JsonRejection) -> AppError {
     if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
         AppError::new(ErrorCode::DownloadTooLarge, "Request body exceeds 16 KiB")
     } else {
@@ -238,7 +255,7 @@ async fn create_download(
     let job = state.jobs.submit(request).await?;
     Ok((StatusCode::ACCEPTED, Json(view(job))))
 }
-fn parse_id(id: &str) -> Result<Uuid> {
+pub(crate) fn parse_id(id: &str) -> Result<Uuid> {
     Uuid::parse_str(id).map_err(|_| AppError::invalid("Job identifier must be a UUID"))
 }
 async fn get_download(
@@ -284,7 +301,7 @@ async fn download_file(State(state): State<ApiState>, Path(id): Path<String>) ->
     );
     Ok(response)
 }
-fn view(record: JobRecord) -> JobView {
+pub(crate) fn view(record: JobRecord) -> JobView {
     let status = match record.status {
         JobStatus::Queued => JobState::Queued,
         JobStatus::Running => JobState::Running,

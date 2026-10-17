@@ -1,0 +1,12 @@
+{
+  "name": "youtube-extractor-browser-checks",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check:frontend": "node --check web/app.js && node --check web/url.mjs && node --check tests/frontend/browser.test.mjs && node --check tests/frontend/url.test.mjs",
+    "test:frontend": "node --test tests/frontend/*.test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

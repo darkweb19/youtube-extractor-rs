@@ -4,6 +4,7 @@ ARG CARGO_BUILD_JOBS=3
 WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src ./src
+COPY web ./web
 # Optional session trust mounts are never retained in an image layer.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \

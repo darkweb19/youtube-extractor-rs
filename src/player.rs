@@ -21,7 +21,7 @@ impl SignatureAlgorithm {
         }
         let mut rest = script;
         let mut candidates = Vec::new();
-        for _ in 0..64 {
+        for _ in 0..4096 {
             let Some(pos) = rest.find("function(") else {
                 break;
             };

@@ -4,7 +4,7 @@ A standalone Rust/Axum HTTP service with its own player-response parser and stre
 
 Use only publicly accessible media you are authorized to download. The service does not bypass DRM, sign-in requirements, CAPTCHA, or upstream access restrictions. A native implementation cannot fix a hosting provider's outbound-IP restriction.
 
-This is an initial implementation with a deliberately limited protocol surface. Direct media formats are supported; unsupported player signatures, throttling transforms, live streams and manifest-only delivery must fail explicitly. See [architecture](docs/architecture.md), [API](docs/api.md), and [deployment](docs/deployment.md). Production acceptance requires actual metadata, audio and video verification from the intended deployment environment. A successful health check or fixture test does not establish YouTube compatibility.
+This is an initial implementation with a deliberately limited protocol surface. Direct media formats are supported. A narrow native decoder recognizes classical signature swap/reverse/splice operations in public player JavaScript; unfamiliar signatures fail explicitly. Direct URLs with an untransformed n parameter are attempted without claiming n transformation and may be throttled or denied. Live streams and manifest-only delivery remain unsupported. See [architecture](docs/architecture.md), [API](docs/api.md), and [deployment](docs/deployment.md). Production acceptance requires actual metadata, audio and video verification from the intended deployment environment. A successful health check or fixture test does not establish YouTube compatibility.
 
 See [protocol support](docs/protocol-support.md) for the exact supported parser and stream surface, JavaScript evaluation decision and manifest roadmap.
 
@@ -204,7 +204,7 @@ The storage budget can reject admission before the queue fills. A remux usually 
 | `/health` returns `503` | Writable `DATA_DIR`, volume ownership, and FFmpeg/FFprobe availability |
 | `NETWORK` / `DNS` | Host DNS, outbound HTTPS policy, proxy trust, and allowed YouTube/media destinations |
 | `ACCESS_RESTRICTED` | Upstream content or automated-access restriction; do not bypass it |
-| `UNSUPPORTED_FORMAT` | Supported codecs/protocols; JavaScript `s`/`n` transforms and manifest delivery are not implemented |
+| `UNSUPPORTED_FORMAT` | Unsupported player signature grammar, incompatible streams, or manifest-only delivery; direct n URLs may be throttled or denied |
 | `QUEUE_FULL` / `RATE_LIMITED` | Worker, queue, storage, retention, and request-rate limits; back off before retrying |
 
 ## Development and verification

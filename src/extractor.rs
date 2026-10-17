@@ -4,6 +4,7 @@ use crate::{
     error::{AppError, ErrorCode, Result},
     model::{MediaFormat, Thumbnail, VideoId, VideoInfo},
     network::{validate_media_url, Destination, SafeHttpClient},
+    player::{player_script_url, SignatureAlgorithm},
 };
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -37,7 +38,23 @@ impl Extractor for YoutubeExtractor {
             .await?;
         let html =
             std::str::from_utf8(&bytes).map_err(|_| changed("Watch page is not valid UTF-8"))?;
-        parse_watch_page(html, &id)
+        match parse_watch_page(html, &id) {
+            Err(error) if error.code == ErrorCode::UnsupportedFormat
+                && error.message == "No supported direct streams; signature or throttling JavaScript resolution may be required" =>
+            {
+                let Some(url) = player_script_url(html) else {
+                    return Err(error);
+                };
+                let js = self.http.get_bytes(&url, Destination::Youtube, 4 * 1024 * 1024).await?;
+                let js = std::str::from_utf8(&js)
+                    .map_err(|_| changed("Public player JavaScript is invalid UTF-8"))?;
+                let Some(decoder) = SignatureAlgorithm::parse(js) else {
+                    return Err(unsupported("Public player uses signature operations unsupported by the native resolver"));
+                };
+                parse_watch_page_with_signature(html, &id, Some(&decoder))
+            }
+            result => result,
+        }
     }
 }
 
@@ -184,6 +201,14 @@ fn unsupported(message: &str) -> AppError {
 
 /// Parse an HTML watch response. The scan respects nested objects, quoted braces and JSON escapes.
 pub fn parse_watch_page(html: &str, expected: &VideoId) -> Result<VideoInfo> {
+    parse_watch_page_with_signature(html, expected, None)
+}
+
+fn parse_watch_page_with_signature(
+    html: &str,
+    expected: &VideoId,
+    signature: Option<&SignatureAlgorithm>,
+) -> Result<VideoInfo> {
     let mut remaining = html;
     let marker = "ytInitialPlayerResponse";
     while let Some(pos) = remaining.find(marker) {
@@ -197,7 +222,7 @@ pub fn parse_watch_page(html: &str, expected: &VideoId) -> Result<VideoInfo> {
             if value.starts_with('{') {
                 let json = balanced_object(value)
                     .ok_or_else(|| changed("Truncated or malformed player response"))?;
-                return parse_player_response(json, expected);
+                return parse_player_response_with_signature(json, expected, signature);
             }
         }
         remaining = tail;
@@ -254,6 +279,14 @@ fn balanced_object(input: &str) -> Option<&str> {
 }
 
 pub fn parse_player_response(json: &str, expected: &VideoId) -> Result<VideoInfo> {
+    parse_player_response_with_signature(json, expected, None)
+}
+
+fn parse_player_response_with_signature(
+    json: &str,
+    expected: &VideoId,
+    signature: Option<&SignatureAlgorithm>,
+) -> Result<VideoInfo> {
     let player: PlayerResponse = serde_json::from_str(json)
         .map_err(|_| changed("Player response schema is unsupported or malformed"))?;
     if player.playability_status.status != "OK" {
@@ -302,7 +335,7 @@ pub fn parse_player_response(json: &str, expected: &VideoId) -> Result<VideoInfo
         if !format.drm_families.is_empty() || format.drm_track_type.is_some() {
             continue;
         }
-        if let Some(parsed) = parse_format(format)? {
+        if let Some(parsed) = parse_format(format, signature)? {
             formats.push(parsed);
         }
     }
@@ -327,7 +360,7 @@ pub fn parse_player_response(json: &str, expected: &VideoId) -> Result<VideoInfo
     })
 }
 
-fn parse_format(format: PlayerFormat) -> Result<Option<MediaFormat>> {
+fn parse_format(format: PlayerFormat, signature: Option<&SignatureAlgorithm>) -> Result<Option<MediaFormat>> {
     let (base, attributes) = format
         .mime_type
         .split_once(';')
@@ -361,8 +394,7 @@ fn parse_format(format: PlayerFormat) -> Result<Option<MediaFormat>> {
         Some(url)
     } else if let Some(ref cipher) = cipher {
         let pairs: Vec<_> = url::form_urlencoded::parse(cipher.as_bytes()).collect();
-        // An s value needs a changing JS decipher algorithm, explicitly deferred.
-        if pairs.iter().any(|(k, _)| k == "s") {
+        if pairs.iter().any(|(k, _)| k == "s") && signature.is_none() {
             return Ok(None);
         }
         let urls: Vec<_> = pairs.iter().filter(|(k, _)| k == "url").collect();
@@ -370,16 +402,20 @@ fn parse_format(format: PlayerFormat) -> Result<Option<MediaFormat>> {
             return Err(changed("Malformed stream cipher URL"));
         }
         let mut parsed = validate_media_url(&urls[0].1)?;
-        if let Some((_, signature)) = pairs.iter().find(|(k, _)| k == "sig" || k == "signature") {
-            let key = pairs
-                .iter()
-                .find(|(k, _)| k == "sp")
-                .map(|(_, v)| v.as_ref())
-                .unwrap_or("signature");
-            if !matches!(key, "sig" | "signature") {
-                return Ok(None);
-            }
-            parsed.query_pairs_mut().append_pair(key, signature);
+        let key = pairs
+            .iter()
+            .find(|(k, _)| k == "sp")
+            .map(|(_, v)| v.as_ref())
+            .unwrap_or("signature");
+        if !matches!(key, "sig" | "signature") {
+            return Ok(None);
+        }
+        if let Some((_, value)) = pairs.iter().find(|(k, _)| k == "s") {
+            let Some(decoder) = signature else { return Ok(None) };
+            let decoded = decoder.decipher(value)?;
+            parsed.query_pairs_mut().append_pair(key, &decoded);
+        } else if let Some((_, sig)) = pairs.iter().find(|(k, _)| k == "sig" || k == "signature") {
+            parsed.query_pairs_mut().append_pair(key, sig);
         }
         Some(parsed.to_string())
     } else {
@@ -390,7 +426,7 @@ fn parse_format(format: PlayerFormat) -> Result<Option<MediaFormat>> {
     };
     let url = validate_media_url(&direct_url)?;
     if url.query_pairs().any(|(k, _)| k == "n") {
-        return Ok(None);
+        tracing::debug!(itag = format.itag, "Using unmodified n parameter; transfer may be throttled or denied");
     }
     Ok(Some(MediaFormat {
         itag: format.itag,
@@ -501,7 +537,7 @@ mod tests {
         );
     }
     #[test]
-    fn rejects_drm_signature_n_transform_and_manifest_only() {
+    fn rejects_drm_cipher_without_decoder_and_manifest_only() {
         let id = VideoId::new(ID).unwrap();
         let original: serde_json::Value =
             serde_json::from_str(include_str!("../tests/fixtures/player-direct.json")).unwrap();
@@ -509,7 +545,6 @@ mod tests {
             serde_json::json!({"hlsManifestUrl":"https://example.invalid/playlist.m3u8"}),
             serde_json::json!({"drmFamilies":["WIDEVINE"]}),
             serde_json::json!({"formats":[{"itag":18,"mimeType":"video/mp4","signatureCipher":"s=secret&url=https%3A%2F%2Fr1.googlevideo.com%2Fvideoplayback"}]}),
-            serde_json::json!({"formats":[{"itag":18,"mimeType":"video/mp4","url":"https://r1.googlevideo.com/videoplayback?n=secret"}]}),
         ] {
             let mut json = original.clone();
             json["streamingData"] = streaming;
@@ -520,6 +555,48 @@ mod tests {
                 ErrorCode::UnsupportedFormat
             );
         }
+    }
+    #[test]
+    fn retains_public_n_stream_without_claiming_it_was_transformed() {
+        let id = VideoId::new(ID).unwrap();
+        let mut json: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/player-direct.json")).unwrap();
+        json["streamingData"] = serde_json::json!({
+            "formats": [{
+                "itag": 18,
+                "mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"",
+                "height": 360,
+                "url": "https://r1.googlevideo.com/videoplayback?n=secret"
+            }]
+        });
+        let info = parse_player_response(&json.to_string(), &id).unwrap();
+        assert_eq!(info.formats.len(), 1);
+        assert_eq!(info.formats[0].itag, 18);
+    }
+    #[test]
+    fn decodes_supported_signature_cipher_without_leaking_the_signed_url() {
+        let id = VideoId::new(ID).unwrap();
+        let player_js = r#"var AL={RV:function(a){a.reverse()},DR:function(a,b){a.splice(0,b)},SW:function(a,b){var c=a[0];a[0]=a[b%a.length];a[b]=c}};XY=function(a){a=a.split("");AL.SW(a,2);AL.RV(a);AL.DR(a,1);return a.join("")};"#;
+        let decoder = SignatureAlgorithm::parse(player_js).unwrap();
+        let mut json: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/player-direct.json")).unwrap();
+        json["streamingData"] = serde_json::json!({
+            "formats": [{
+                "itag": 18,
+                "mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"",
+                "height": 360,
+                "signatureCipher": "s=abcdef&sp=signature&url=https%3A%2F%2Fr1.googlevideo.com%2Fvideoplayback"
+            }]
+        });
+        let public_json = json.to_string();
+        assert_eq!(
+            parse_player_response(&public_json, &id).unwrap_err().code,
+            ErrorCode::UnsupportedFormat
+        );
+        let info = parse_player_response_with_signature(&public_json, &id, Some(&decoder)).unwrap();
+        let signed = info.formats[0].url.as_deref().unwrap();
+        assert!(signed.contains("signature=edabc"));
+        assert!(!serde_json::to_string(&info).unwrap().contains("signature=edabc"));
     }
     #[test]
     fn bounded_scanner_rejects_truncation_and_handles_window_assignment() {

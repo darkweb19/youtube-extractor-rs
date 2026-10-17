@@ -34,7 +34,7 @@ The supported typed fields are:
 
 A format needs an allowed HTTPS URL on a subdomain of `googlevideo.com`. MP4 video, MP4 audio exposed as M4A, and WebM audio/video MIME types are supported. Signed URLs remain internal and are not serialized in the public metadata or job API. The original signed query is preserved; the service does not mint signatures.
 
-A `signatureCipher`/`cipher` containing a URL and an already supplied `sig` or `signature` can be decoded as URL-encoded fields. Only the `sig` or `signature` destination parameter is accepted. A cipher containing `s` is skipped because it requires an unimplemented transform. A media URL containing `n` is also skipped because its current throttling transform is unimplemented. Unknown MIME formats are skipped. Invalid media destinations fail explicitly rather than being fetched.
+A `signatureCipher`/`cipher` containing a URL and an already supplied `sig` or `signature` can be decoded as URL-encoded fields. Only the `sig` or `signature` destination parameter is accepted. A cipher containing `s` is only resolved if a strictly bounded native parser recognizes a unique, classical swap/reverse/splice signature function in the same-origin public player script. This is not a general JavaScript decoder. URLs with an `n` query parameter are retained unchanged and may be throttled or rejected by YouTube; the `n` transformation is not implemented. Unknown MIME formats are skipped. Invalid media destinations fail explicitly rather than being fetched.
 
 A successful metadata response contains at least one supported direct format. If all candidates require unimplemented resolution, the result is `UNSUPPORTED_FORMAT`, rather than a misleading successful empty list. When supported direct formats coexist with unsupported candidates, only supported formats are returned. This release does not expose a separate per-format omission reason.
 
@@ -55,7 +55,7 @@ Classification is necessarily bounded by what the upstream exposes. An unfamilia
 
 ## JavaScript URL-resolution assessment
 
-The user brief permits evaluating an embedded general-purpose JavaScript engine or constrained native implementation for legitimate URL resolution. Neither option is implemented or claimed as supported here. No current player JavaScript samples have been validated against authorized live media from this environment; the environment's current egress policy blocks YouTube. Changing implementation language does not remove that restriction.
+The service now includes a limited native recognizer of classical signature functions but not an embedded JavaScript engine, general signature support, or an `n` transform. No current player JavaScript samples have been validated against authorized live media from this environment; the environment's current egress policy blocks YouTube. Changing implementation language does not remove that restriction.
 
 | Option | What must be implemented | Benefits | Limitations and required controls |
 | --- | --- | --- | --- |
@@ -68,7 +68,7 @@ If that experiment cannot cover an observed legitimate function without becoming
 
 A JavaScript prototype must expose no filesystem, network, environment, process, module-loading, timers, or other host I/O. It must enforce input/output byte limits, heap and stack limits, and an execution budget through the runtime's interruption mechanism. An async Rust timeout alone is insufficient for a non-yielding interpreter. Prefer a killable worker process with OS memory/CPU limits if hard interruption cannot be demonstrated. Ensure concurrency and process teardown remain bounded on cancellation. Railway's available process-isolation controls must be verified rather than assumed.
 
-Only consider URL transforms after the public player reports playable, clear content. DRM, sign-in, CAPTCHA, consent, and other access denials remain terminal. Do not execute arbitrary page scripts or expand host capabilities to make a denied or unsupported case work. Before advertising decipher support, require controlled transform tests, malicious/looping-program tests, and an authorized end-to-end media download using current player data on the intended host.
+Only consider URL transforms after the public player reports playable, clear content. DRM, sign-in, CAPTCHA, consent, and other access denials remain terminal. Do not execute arbitrary page scripts or expand host capabilities to make a denied or unsupported case work. Do not advertise general decipher support without controlled transform tests, malicious/looping-program tests, and an authorized end-to-end media download using current player data on the intended host.
 
 ## Manifest roadmap
 

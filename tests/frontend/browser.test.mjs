@@ -115,7 +115,10 @@ async function setup(t, options = {}) {
   t.after(() => assert.deepEqual(errors, [], 'No uncaught browser exceptions'));
   // A deterministic embedded-player transport: it never contacts YouTube.
   await context.route(/https:\/\/(?:www\.)?(?:youtube(?:-nocookie)?\.com|youtube\.com)\/.*/, route => {
-    if (route.request().resourceType() === 'document') return route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Controlled YouTube preview</title><p>Preview fixture</p><script>addEventListener("message", event => { if (JSON.parse(event.data).event === "listening") parent.postMessage(JSON.stringify({event:"onReady"}), event.origin); });</script>' });
+    if (route.request().resourceType() === 'document') {
+      const fulfill = () => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Controlled YouTube preview</title><button type="button">Play preview</button><script>addEventListener("message", event => { if (JSON.parse(event.data).event === "listening") parent.postMessage(JSON.stringify({event:"onReady"}), event.origin); });</script>' });
+      return options.previewDelayMs ? new Promise(resolve => setTimeout(resolve, options.previewDelayMs)).then(fulfill) : fulfill();
+    }
     return route.fulfill({ contentType: 'text/javascript', body: '' });
   });
   await page.goto(origin);
@@ -165,7 +168,7 @@ test('without JavaScript the form remains disabled and explains the prerequisite
 });
 
 test('confirmation previews correct ID without generating; Escape restores focus and dialog traps keyboard', async t => {
-  const { page } = await setup(t);
+  const { page } = await setup(t, { previewDelayMs: 150 });
   await page.screenshot({ path: join(artifacts, 'desktop-initial.png'), fullPage: true });
   await preview(page);
   assert.equal(state.creates, 0);
@@ -173,11 +176,28 @@ test('confirmation previews correct ID without generating; Escape restores focus
   const iframe = page.locator('#preview-container iframe');
   await iframe.waitFor();
   assert.match(await iframe.getAttribute('src'), /\/embed\/dQw4w9WgXcQ(?:\?|$)/);
+  const previewControl = page.frameLocator('#preview-player').getByRole('button', { name: 'Play preview' });
+  await previewControl.waitFor();
   await page.screenshot({ path: join(artifacts, 'desktop-preview.png'), fullPage: true });
-  for (let i = 0; i < 8; i++) {
-    await page.keyboard.press('Tab');
-    assert.ok(await page.evaluate(() => document.querySelector('#confirm-dialog').contains(document.activeElement)), 'Focus stays in dialog');
-  }
+  assert.ok(await page.locator('#cancel-preview').evaluate(el => el === document.activeElement), 'Cancel initially receives focus');
+  await page.locator('#continue-button').focus();
+  await page.keyboard.press('Tab');
+  assert.ok(await page.locator('#close-preview').evaluate(el => el === document.activeElement), 'Tab wraps to the first modal control');
+  await page.keyboard.press('Shift+Tab');
+  assert.ok(await page.locator('#continue-button').evaluate(el => el === document.activeElement), 'Shift+Tab wraps to the last modal control');
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Tab');
+  assert.ok(await iframe.evaluate(el => el === document.activeElement), 'Keyboard users can enter the embedded player');
+  assert.ok(await previewControl.evaluate(el => el === document.activeElement), 'The embedded player receives keyboard focus');
+  await page.keyboard.press('Tab');
+  assert.ok(await page.locator('#watch-link').evaluate(el => el === document.activeElement), 'Tab exits the player into the modal');
+  await page.keyboard.press('Shift+Tab');
+  assert.ok(await iframe.evaluate(el => el === document.activeElement), 'Shift+Tab can reenter the embedded player');
+  await page.keyboard.press('Shift+Tab');
+  assert.ok(await page.locator('#close-preview').evaluate(el => el === document.activeElement), 'Shift+Tab returns from the player to the modal');
+  // Cross-origin player keys belong to that document. Exercise Escape after real
+  // keyboard navigation returns to a host control, rather than after an arbitrary
+  // Tab count whose destination varies with iframe loading and Chromium versions.
   await page.keyboard.press('Escape');
   await until(() => page.locator('#confirm-dialog').evaluate(el => !el.open), 'Escape closes preview');
   assert.equal(state.creates, 0);

@@ -2,6 +2,15 @@
 
 ## Public frontend verification — 2026-10-17
 
+CI follow-up: the initial browser run failed its Escape assertion when delayed
+iframe loading left focus inside the cross-origin player after eight Tab presses.
+The original assertion was reproduced locally with a delayed, focusable player
+fixture. The corrected regression checks forward/reverse player navigation and
+modal focus wrapping, then Escape from a host control. All 19 browser tests pass
+with Node.js 22.23.3 and system Chromium, as well as Node.js 24.19.0. The separate
+initial Rust CI test failure has not been reproduced locally; repeated complete
+suites passed. These local results do not establish a successful hosted CI rerun.
+
 The public browser generator was checked with Rust 1.99.1, Node.js 24.19.0,
 Chromium, FFmpeg and the committed Cargo/npm lockfiles in the managed Linux
 environment. Production remains the Rust binary with embedded HTML/CSS/JavaScript;

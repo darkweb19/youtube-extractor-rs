@@ -40,16 +40,21 @@ impl Extractor for YoutubeExtractor {
             std::str::from_utf8(&bytes).map_err(|_| changed("Watch page is not valid UTF-8"))?;
         match parse_watch_page(html, &id) {
             Err(error) if error.code == ErrorCode::UnsupportedFormat
-                && error.message == "No supported direct streams; signature or throttling JavaScript resolution may be required" =>
+                && error.message.starts_with("No supported direct streams;") =>
             {
                 let Some(url) = player_script_url(html) else {
                     return Err(error);
                 };
-                let js = self.http.get_bytes(&url, Destination::Youtube, 4 * 1024 * 1024).await?;
+                let js = self
+                    .http
+                    .get_bytes(&url, Destination::Youtube, 4 * 1024 * 1024)
+                    .await?;
                 let js = std::str::from_utf8(&js)
                     .map_err(|_| changed("Public player JavaScript is invalid UTF-8"))?;
                 let Some(decoder) = SignatureAlgorithm::parse(js) else {
-                    return Err(unsupported("Public player uses signature operations unsupported by the native resolver"));
+                    return Err(unsupported(
+                        "Public player uses signature operations unsupported by the native resolver",
+                    ));
                 };
                 parse_watch_page_with_signature(html, &id, Some(&decoder))
             }
@@ -360,7 +365,10 @@ fn parse_player_response_with_signature(
     })
 }
 
-fn parse_format(format: PlayerFormat, signature: Option<&SignatureAlgorithm>) -> Result<Option<MediaFormat>> {
+fn parse_format(
+    format: PlayerFormat,
+    signature: Option<&SignatureAlgorithm>,
+) -> Result<Option<MediaFormat>> {
     let (base, attributes) = format
         .mime_type
         .split_once(';')
@@ -411,10 +419,15 @@ fn parse_format(format: PlayerFormat, signature: Option<&SignatureAlgorithm>) ->
             return Ok(None);
         }
         if let Some((_, value)) = pairs.iter().find(|(k, _)| k == "s") {
-            let Some(decoder) = signature else { return Ok(None) };
+            let Some(decoder) = signature else {
+                return Ok(None);
+            };
             let decoded = decoder.decipher(value)?;
             parsed.query_pairs_mut().append_pair(key, &decoded);
-        } else if let Some((_, sig)) = pairs.iter().find(|(k, _)| k == "sig" || k == "signature") {
+        } else if let Some((_, sig)) = pairs
+            .iter()
+            .find(|(k, _)| k == "sig" || k == "signature")
+        {
             parsed.query_pairs_mut().append_pair(key, sig);
         }
         Some(parsed.to_string())
@@ -426,7 +439,10 @@ fn parse_format(format: PlayerFormat, signature: Option<&SignatureAlgorithm>) ->
     };
     let url = validate_media_url(&direct_url)?;
     if url.query_pairs().any(|(k, _)| k == "n") {
-        tracing::debug!(itag = format.itag, "Using unmodified n parameter; transfer may be throttled or denied");
+        tracing::debug!(
+            itag = format.itag,
+            "Using unmodified n parameter; transfer may be throttled or denied"
+        );
     }
     Ok(Some(MediaFormat {
         itag: format.itag,
@@ -593,10 +609,15 @@ mod tests {
             parse_player_response(&public_json, &id).unwrap_err().code,
             ErrorCode::UnsupportedFormat
         );
-        let info = parse_player_response_with_signature(&public_json, &id, Some(&decoder)).unwrap();
+        let info =
+            parse_player_response_with_signature(&public_json, &id, Some(&decoder)).unwrap();
         let signed = info.formats[0].url.as_deref().unwrap();
         assert!(signed.contains("signature=edabc"));
-        assert!(!serde_json::to_string(&info).unwrap().contains("signature=edabc"));
+        assert!(
+            !serde_json::to_string(&info)
+                .unwrap()
+                .contains("signature=edabc")
+        );
     }
     #[test]
     fn bounded_scanner_rejects_truncation_and_handles_window_assignment() {

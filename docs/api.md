@@ -103,7 +103,11 @@ operator through `/api/v1`. A failed or expired browser session must be refreshe
 explicitly, without automatically resubmitting a generation request.
 
 Set `UI_SECURE_COOKIES=true` for HTTPS deployments, and configure an exact
-`UI_PUBLIC_ORIGIN` if a reverse proxy rewrites Host. Set `FRONTEND_ENABLED=false`
+`UI_PUBLIC_ORIGIN` if a reverse proxy rewrites Host or a custom domain is used.
+When unset, `UI_PUBLIC_ORIGIN` defaults to `https://$RAILWAY_PUBLIC_DOMAIN` if
+Railway supplies that variable. Secure cookies default to true for the resolved
+HTTPS origin; explicit cookie settings take precedence. Expected origins are
+never derived from visitor-supplied forwarded headers. Set `FRONTEND_ENABLED=false`
 to remove the browser page, assets and `/ui` endpoints while retaining the API.
 See [ADR 0002](adr/0002-public-browser-generator.md) and the
 [frontend review](frontend-review.md) for the security boundary and limits.

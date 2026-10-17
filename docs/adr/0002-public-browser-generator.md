@@ -43,8 +43,11 @@ deployments that need the original private API only.
 
 ## Consequences
 
-Production HTTPS deployments must set `UI_SECURE_COOKIES=true`. A deployment
+Production HTTPS deployments use `UI_SECURE_COOKIES=true`. A deployment
 whose reverse proxy rewrites Host can configure its exact `UI_PUBLIC_ORIGIN`.
+When unset, Railway's server-provided `RAILWAY_PUBLIC_DOMAIN` supplies the HTTPS
+origin. Secure cookies default to true for a resolved HTTPS origin, with explicit
+settings taking precedence. Client-supplied forwarded headers remain untrusted.
 Keep one service replica: anonymous sessions and workers are local to that
 process. Restart/session expiry requires generating a new browser job; the
 operator can still access retained jobs through the authenticated API.

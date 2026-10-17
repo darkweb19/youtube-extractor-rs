@@ -57,8 +57,11 @@ loading a complete MP4 into JavaScript memory.
   in memory. Restarting the service clears browser access even if a persistent
   volume still contains the underlying job and MP4. Use one replica.
 - Reverse proxies must preserve the public Host or supply an exact configured
-  `UI_PUBLIC_ORIGIN`; HTTPS deployments must enable secure cookies. Forwarded
-  headers supplied by visitors are not trusted to reconstruct the origin.
+  `UI_PUBLIC_ORIGIN`. Railway's server-provided `RAILWAY_PUBLIC_DOMAIN` supplies
+  the default HTTPS origin when no explicit origin is set. Secure cookies default
+  to true for a resolved HTTPS origin; an explicit setting overrides inference.
+  Custom domains require a matching explicit origin. Forwarded headers supplied
+  by visitors are not trusted to reconstruct the origin.
 - Download uses a HEAD availability check followed by the browser's native
   attachment request. Preflight and playback failures can appear as frontend
   notifications. Transfer failures after a successful preflight are reported by

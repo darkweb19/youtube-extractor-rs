@@ -494,6 +494,7 @@ async fn browser_session_is_stable_and_secure_origin_configuration_is_exact() {
         "https://user:pass@video.example.com",
         "http://video.example.com",
         "*",
+        "invalid RAILWAY_PUBLIC_DOMAIN",
     ] {
         let temp = tempfile::tempdir().unwrap();
         let (app, _, jobs) = app_with_settings(
@@ -517,6 +518,104 @@ async fn browser_session_is_stable_and_secure_origin_configuration_is_exact() {
             .contains("UI_PUBLIC_ORIGIN"));
         jobs.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn railway_https_origin_works_behind_internal_host_without_trusting_forwarded_headers() {
+    const PUBLIC_ORIGIN: &str = "https://youtube-extractor-rs-production.up.railway.app";
+    let temp = tempfile::tempdir().unwrap();
+    let (app, _, jobs) = app_with_settings(
+        temp.path(),
+        120,
+        4,
+        BrowserSettings {
+            secure_cookies: true,
+            public_origin: Some(PUBLIC_ORIGIN.into()),
+        },
+    )
+    .await;
+    let mut request = req("GET", "/ui/session", None, None, "");
+    request
+        .headers_mut()
+        .insert("host", "service.railway.internal:8080".parse().unwrap());
+    request
+        .headers_mut()
+        .insert("origin", PUBLIC_ORIGIN.parse().unwrap());
+    request
+        .headers_mut()
+        .insert("sec-fetch-site", "same-origin".parse().unwrap());
+    let response = app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = response.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(cookie.contains("; Secure"));
+    let csrf = json(response).await["csrf_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let cookie = cookie.split(';').next().unwrap();
+
+    for (origin, fetch_site) in [
+        ("https://evil.example", "same-origin"),
+        (
+            "http://youtube-extractor-rs-production.up.railway.app",
+            "same-origin",
+        ),
+        (
+            "https://youtube-extractor-rs-production.up.railway.app.evil.example",
+            "same-origin",
+        ),
+        (PUBLIC_ORIGIN, "cross-site"),
+    ] {
+        let mut request = req("POST", "/ui/downloads", Some(cookie), Some(&csrf), INPUT);
+        request
+            .headers_mut()
+            .insert("origin", origin.parse().unwrap());
+        request
+            .headers_mut()
+            .insert("sec-fetch-site", fetch_site.parse().unwrap());
+        // Even an attacker-controlled proxy assertion cannot replace the
+        // server-configured Railway public domain.
+        request
+            .headers_mut()
+            .insert("x-forwarded-host", "evil.example".parse().unwrap());
+        request
+            .headers_mut()
+            .insert("x-forwarded-proto", "https".parse().unwrap());
+        request.headers_mut().insert(
+            "forwarded",
+            "host=evil.example;proto=https".parse().unwrap(),
+        );
+        assert_eq!(
+            app.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    for csrf in [None, Some(csrf.as_str())] {
+        let mut request = req("POST", "/ui/downloads", Some(cookie), csrf, INPUT);
+        request
+            .headers_mut()
+            .insert("host", "service.railway.internal:8080".parse().unwrap());
+        request
+            .headers_mut()
+            .insert("origin", PUBLIC_ORIGIN.parse().unwrap());
+        request
+            .headers_mut()
+            .insert("sec-fetch-site", "same-origin".parse().unwrap());
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            if csrf.is_some() {
+                StatusCode::ACCEPTED
+            } else {
+                StatusCode::FORBIDDEN
+            }
+        );
+    }
+    jobs.shutdown().await;
 }
 
 #[tokio::test]

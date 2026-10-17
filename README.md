@@ -34,6 +34,10 @@ to previous jobs. Download a completed file while your session is available.
 For HTTPS hosting, set `UI_SECURE_COOKIES=true`. Set `FRONTEND_ENABLED=false`
 to disable the public page and browser routes for an API-only deployment. Public
 traffic uses the same bounded job, request and storage capacity as API clients.
+On Railway, an unset `UI_PUBLIC_ORIGIN` defaults to
+`https://$RAILWAY_PUBLIC_DOMAIN`. Secure cookies default to true when the resolved
+origin is HTTPS. Explicit settings override these defaults. For a custom domain,
+set `UI_PUBLIC_ORIGIN` to that exact HTTPS origin without a trailing slash.
 
 ### Run locally
 
@@ -144,7 +148,7 @@ curl --fail --silent --show-error --request DELETE \
 1. Create a **separate service** from this GitHub repository and select the reviewed branch/commit. Keep the repository root as the build root. The supplied `railway.toml` selects the Dockerfile, `/health`, restart policy, and one replica. Let the Docker image's entry point start the service.
    Use the default `Dockerfile`, which has no build mounts and avoids Railway's mount restrictions. `Dockerfile.cloud` is only for local managed environments that require proxy certificate mounts.
 2. Set `API_TOKEN` to a strong random secret, `ALLOW_UNAUTHENTICATED=false`, and `DATA_DIR=/data` in service variables. Railway supplies `PORT`; the application listens on `0.0.0.0:$PORT`.
-   Set `UI_SECURE_COOKIES=true` for the public HTTPS frontend. If the proxy rewrites Host, set `UI_PUBLIC_ORIGIN` to the exact HTTPS origin without a trailing slash. Leave `FRONTEND_ENABLED=true` for the public generator, or set it false for API-only use.
+   Set `UI_SECURE_COOKIES=true` for the public HTTPS frontend. The Railway domain is detected through `RAILWAY_PUBLIC_DOMAIN` when `UI_PUBLIC_ORIGIN` is unset. For a custom domain or an origin mismatch, set `UI_PUBLIC_ORIGIN` to the exact HTTPS origin in the browser without a trailing slash. Leave `FRONTEND_ENABLED=true` for the public generator, or set it false for API-only use.
 3. Attach a persistent volume at `/data`, sized above the configured storage budget with room for filesystem overhead (for example, 10 GiB for the default 8 GiB logical budget). Ensure UID/GID `10001:10001` can write it using the platform's supported volume initialization process. The application runs as that non-root user.
 4. Keep **one replica**. Jobs and files use local volume state; replicas do not share a queue or job namespace. Start with roughly 2 CPU cores and 2 GiB RAM for two workers, then measure your workload and apply hard resource limits. These are starting estimates, not measured production guarantees.
 5. Expose an HTTPS domain or use private service networking. Keep the bearer token in the consuming backend's secret settings. Set the health-check path to `/health`, and verify that a `POST /api/v1/videos/info` request without an authorization header returns `401`.
@@ -205,8 +209,8 @@ Check volume permissions for UID/GID `10001:10001` on every platform. Diskless o
 | `API_TOKEN` | required | Same secret for every authenticated route, including files; at least 32 visible ASCII characters |
 | `ALLOW_UNAUTHENTICATED` | `false` | Keep false in production |
 | `FRONTEND_ENABLED` | `true` | Public browser generator at `/`; false disables its page and `/ui` routes |
-| `UI_SECURE_COOKIES` | `false` | Set true for HTTPS hosting; false permits local HTTP development |
-| `UI_PUBLIC_ORIGIN` | unset | Exact public origin if a reverse proxy rewrites Host |
+| `UI_SECURE_COOKIES` | true for a resolved HTTPS origin; otherwise false | Explicit setting overrides inference; use true for HTTPS hosting |
+| `UI_PUBLIC_ORIGIN` | Railway HTTPS domain when available; otherwise unset | Exact public origin; explicit value takes precedence, including for custom domains |
 | `PORT` | `8080` | Use the provider's assigned port, or route to 8080 |
 | `DATA_DIR` | `data`; image: `/data` | Mount persistent writable storage here |
 | `WORKERS` / `QUEUE_CAPACITY` | `2` / `16` | Concurrent jobs / maximum waiting jobs |

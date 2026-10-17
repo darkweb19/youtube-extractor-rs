@@ -1,5 +1,25 @@
 # Verification results
 
+## Railway browser-origin correction — 2026-10-17
+
+Origin inference previously assumed HTTP when secure cookies were unset, causing
+an HTTPS browser origin to be rejected. The browser bridge now resolves an unset
+`UI_PUBLIC_ORIGIN` from Railway's server-provided `RAILWAY_PUBLIC_DOMAIN` and
+defaults secure cookies for a resolved HTTPS origin. Explicit settings retain
+precedence, malformed domain configuration fails closed, and client forwarding
+headers do not control the expected origin.
+
+Formatting, strict Clippy, the native build and all 53 Rust tests passed (34
+library, 4 API, 3 selection, 4 media/storage, 8 web; one external probe ignored).
+New regression tests cover configuration precedence, invalid platform domains,
+the public HTTPS origin behind an internal Host, CSRF, and hostile origins.
+A native runtime smoke additionally exercised actual environment-variable
+resolution and Secure/HttpOnly cookie issuance, correct-origin request validation,
+rejection of foreign origins/spoofed forwarding/missing CSRF, private API 401 and
+clean termination. The deployed Railway URL could not be probed because this
+environment's proxy rejected its CONNECT request with HTTP 403; these results
+therefore do not verify the live deployment.
+
 ## Railway Dockerfile syntax correction — 2026-10-17
 
 Railway rejected unnamed cache mounts and unsupported secret mounts in the

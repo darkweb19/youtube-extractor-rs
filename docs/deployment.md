@@ -18,6 +18,16 @@ Deploy this repository as its own Railway service. It does not need, or share co
 
 The public health route probes local readiness, not YouTube reachability. A healthy deployment may still be denied by YouTube's data-center IP policy. Do not route external verification through a different network and report it as Railway success.
 
+If the frontend reports **Request origin does not match this service**, set
+`UI_PUBLIC_ORIGIN` to the exact browser origin (for example,
+`https://your-service.up.railway.app`) and `UI_SECURE_COOKIES=true`, then redeploy.
+Do not include a trailing slash, path, or quotes in the variable value. An
+explicit origin must match the domain visitors use; replace stale values when
+switching to a custom domain. With `UI_PUBLIC_ORIGIN` unset, Railway's
+server-provided `RAILWAY_PUBLIC_DOMAIN` supplies the HTTPS origin automatically.
+Secure cookies default to true for a resolved HTTPS origin, unless explicitly
+overridden. Visitor-supplied forwarded headers are not used for this decision.
+
 The public generator is served at the same origin as the API; there is no separate
 frontend service or build command. `FRONTEND_ENABLED=true` enables anonymous
 generation through session-owned browser routes. Set it false for a private
@@ -76,8 +86,8 @@ Configured `HTTPS_PROXY`/`ALL_PROXY` (and their lowercase equivalents) are trust
 | `API_TOKEN` | required | Shared bearer token, at least 32 characters, no whitespace |
 | `ALLOW_UNAUTHENTICATED` | `false` | Explicit local development only, with no token configured |
 | `FRONTEND_ENABLED` | `true` | Enable the public browser generator; false removes its page/assets and `/ui` routes |
-| `UI_SECURE_COOKIES` | `false` | Set true for HTTPS; false is for local HTTP development |
-| `UI_PUBLIC_ORIGIN` | unset | Exact public origin if a proxy rewrites Host; HTTPS required with secure cookies |
+| `UI_SECURE_COOKIES` | true for a resolved HTTPS origin; otherwise false | Set true for HTTPS; an explicit setting overrides inference |
+| `UI_PUBLIC_ORIGIN` | `https://$RAILWAY_PUBLIC_DOMAIN` when available; otherwise unset | Explicit exact origin takes precedence; use the browser's domain without a trailing slash |
 | `PORT` | `8080` | Listen port on all IPv4 interfaces |
 | `DATA_DIR` | `data` (`/data` in image) | Job records, temporary media and completed outputs |
 | `WORKERS` | `2` | Concurrent background media jobs, range 1–64 |

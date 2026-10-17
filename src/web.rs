@@ -34,16 +34,58 @@ const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-
 #[derive(Clone, Default)]
 pub struct BrowserSettings {
     pub secure_cookies: bool,
-    /// Exact HTTPS origin for deployments whose proxy rewrites Host.
+    /// Exact public origin for deployments whose proxy rewrites Host.
     pub public_origin: Option<String>,
 }
 impl BrowserSettings {
     fn from_env() -> Self {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Self {
+        // Railway terminates TLS before forwarding to the service. Its
+        // server-provided public domain is authoritative; client-supplied
+        // Origin and forwarding headers must never configure our origin.
+        let public_origin = lookup("UI_PUBLIC_ORIGIN").or_else(|| {
+            lookup("RAILWAY_PUBLIC_DOMAIN").map(|domain| {
+                if valid_public_hostname(&domain) {
+                    format!("https://{domain}")
+                } else {
+                    // Preserve an invalid configuration so same_origin fails
+                    // closed, rather than falling back to the request Host.
+                    "invalid RAILWAY_PUBLIC_DOMAIN".to_string()
+                }
+            })
+        });
+        let secure_cookies = match lookup("UI_SECURE_COOKIES") {
+            Some(value) => value == "true",
+            None => public_origin
+                .as_deref()
+                .is_some_and(|origin| origin.starts_with("https://")),
+        };
         Self {
-            secure_cookies: std::env::var("UI_SECURE_COOKIES").as_deref() == Ok("true"),
-            public_origin: std::env::var("UI_PUBLIC_ORIGIN").ok(),
+            secure_cookies,
+            public_origin,
         }
     }
+}
+
+fn valid_public_hostname(domain: &str) -> bool {
+    !domain.is_empty()
+        && domain.len() <= 253
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label.as_bytes()[0].is_ascii_alphanumeric()
+                && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+        && url::Url::parse(&format!("https://{domain}")).is_ok_and(|url| {
+            url.host_str() == Some(domain)
+                && url.origin().ascii_serialization() == format!("https://{domain}")
+        })
 }
 struct Session {
     csrf: String,
@@ -251,7 +293,7 @@ fn same_origin(state: &WebState, headers: &HeaderMap) -> Result<()> {
                 && url.origin().ascii_serialization() == *origin
         });
         if !valid {
-            return Err(AppError::internal("UI_PUBLIC_ORIGIN must be an exact HTTP(S) origin; HTTPS is required with secure cookies"));
+            return Err(AppError::internal("UI_PUBLIC_ORIGIN must be an exact HTTP(S) origin; HTTPS is required with secure cookies. RAILWAY_PUBLIC_DOMAIN must be a bare hostname"));
         }
     }
     if let Some(site) = headers.get("sec-fetch-site") {
@@ -615,6 +657,98 @@ async fn serve_file(
 mod tests {
     use super::*;
     use std::sync::Barrier;
+
+    fn settings(values: &[(&str, &str)]) -> BrowserSettings {
+        BrowserSettings::from_lookup(|name| {
+            values
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        })
+    }
+
+    #[test]
+    fn railway_origin_defaults_to_https_without_changing_local_defaults() {
+        let local = settings(&[]);
+        assert!(!local.secure_cookies);
+        assert!(local.public_origin.is_none());
+
+        let railway = settings(&[(
+            "RAILWAY_PUBLIC_DOMAIN",
+            "youtube-extractor-rs-production.up.railway.app",
+        )]);
+        assert!(railway.secure_cookies);
+        assert_eq!(
+            railway.public_origin.as_deref(),
+            Some("https://youtube-extractor-rs-production.up.railway.app")
+        );
+    }
+
+    #[test]
+    fn explicit_browser_settings_override_railway_defaults() {
+        let custom = settings(&[
+            ("RAILWAY_PUBLIC_DOMAIN", "service.up.railway.app"),
+            ("UI_PUBLIC_ORIGIN", "https://video.example.com"),
+        ]);
+        assert_eq!(
+            custom.public_origin.as_deref(),
+            Some("https://video.example.com")
+        );
+        assert!(custom.secure_cookies);
+
+        let insecure_override = settings(&[
+            ("RAILWAY_PUBLIC_DOMAIN", "service.up.railway.app"),
+            ("UI_SECURE_COOKIES", "false"),
+        ]);
+        assert!(!insecure_override.secure_cookies);
+        assert_eq!(
+            insecure_override.public_origin.as_deref(),
+            Some("https://service.up.railway.app")
+        );
+
+        let local_secure = settings(&[("UI_SECURE_COOKIES", "true")]);
+        assert!(local_secure.secure_cookies);
+        assert!(local_secure.public_origin.is_none());
+
+        let invalid_explicit = settings(&[
+            ("RAILWAY_PUBLIC_DOMAIN", "service.up.railway.app"),
+            ("UI_PUBLIC_ORIGIN", ""),
+        ]);
+        assert_eq!(invalid_explicit.public_origin.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn invalid_railway_domains_remain_invalid_instead_of_falling_back_to_host() {
+        for domain in [
+            "",
+            "https://service.up.railway.app",
+            "service.up.railway.app/path",
+            "user@service.up.railway.app",
+            "service.up.railway.app:443",
+            "service.up.railway.app?query",
+            "service.up.railway.app#fragment",
+            "service.up.railway.app/",
+            " service.up.railway.app",
+            "service..railway.app",
+            "-service.up.railway.app",
+            "service-.up.railway.app",
+            "service_up.railway.app",
+        ] {
+            for cookies in ["true", "false"] {
+                let invalid = settings(&[
+                    ("RAILWAY_PUBLIC_DOMAIN", domain),
+                    ("UI_SECURE_COOKIES", cookies),
+                ]);
+                let origin = invalid
+                    .public_origin
+                    .expect("invalid configuration must not fall back");
+                assert!(
+                    url::Url::parse(&origin).is_err(),
+                    "unexpectedly accepted {domain}"
+                );
+            }
+        }
+    }
 
     fn sessions() -> (Arc<Mutex<Sessions>>, Uuid) {
         let owner = Uuid::new_v4();

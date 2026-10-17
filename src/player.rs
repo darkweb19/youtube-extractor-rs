@@ -303,7 +303,10 @@ mod tests {
     fn refuses_unrecognized_or_ambiguous_player_functions() {
         assert!(SignatureAlgorithm::parse(&SAMPLE.replace("AL.DR(a,1)", "AL.X(a,1)")).is_none());
         assert!(SignatureAlgorithm::parse(&(SAMPLE.to_owned() + SAMPLE)).is_none());
-        assert!(SignatureAlgorithm::parse(&SAMPLE.replace("a.reverse()", "a.reverse();a.push(1)")).is_none());
+        assert!(
+            SignatureAlgorithm::parse(&SAMPLE.replace("a.reverse()", "a.reverse();a.push(1)"))
+                .is_none()
+        );
     }
 
     #[test]

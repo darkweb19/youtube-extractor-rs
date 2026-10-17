@@ -208,10 +208,11 @@ fn helper(script: &str, obj: &str, method: &str, number: Option<usize>) -> Optio
             if close > 32 {
                 return None;
             }
+            let args = tail[..close].to_string();
             let after = tail[close + 1..].trim_start();
             if let Some(code) = block(after, '{', '}') {
                 if code.len() <= 500 {
-                    methods.push(code);
+                    methods.push((args, code));
                 }
             }
         }
@@ -219,16 +220,35 @@ fn helper(script: &str, obj: &str, method: &str, number: Option<usize>) -> Optio
     if methods.len() != 1 {
         return None;
     }
-    let body = methods[0];
-    if body.contains(".reverse()") && !body.contains(".splice(") {
-        Some(Op::Reverse)
-    } else if body.contains(".splice(0,") && !body.contains(".reverse()") {
-        number.map(Op::Drop)
-    } else if body.contains("[0]")
-        && body.contains('%')
-        && body.contains(".length")
-        && !body.contains(".reverse()")
-        && !body.contains(".splice(")
+    let (args, body) = methods[0].clone();
+    let args: Vec<&str> = args.split(',').map(str::trim).collect();
+    if args.is_empty() || args.len() > 2 || !args.iter().all(|arg| ident(arg)) {
+        return None;
+    }
+    let first = args[0];
+    let compact: String = body
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let compact = compact.trim_end_matches(';');
+    if compact == format!("{first}.reverse()") {
+        return Some(Op::Reverse);
+    }
+    let second = *args.get(1)?;
+    if compact == format!("{first}.splice(0,{second})") {
+        return number.map(Op::Drop);
+    }
+    let source = compact.strip_prefix("var").or_else(|| compact.strip_prefix("let"))?;
+    let (temporary, _) = source.split_once('=')?;
+    if !ident(temporary) {
+        return None;
+    }
+    if source
+        == format!(
+            "{temporary}={first}[0];{first}[0]={first}[{second}%{first}.length];{first}[{second}]={temporary}"
+        )
     {
         number.map(Op::Swap)
     } else {

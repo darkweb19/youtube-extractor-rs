@@ -1,5 +1,23 @@
 # Verification results
 
+## Railway Dockerfile syntax correction — 2026-10-17
+
+Railway rejected unnamed cache mounts and unsupported secret mounts in the
+deployment Dockerfile. The default `Dockerfile` now uses ordinary build steps
+without any build mounts; CI checks that restriction before building the image.
+`Dockerfile.cloud` retains temporary proxy CA mounts and explicitly named caches
+for this managed development environment. `railway.toml` continues to select
+the default `Dockerfile`.
+
+The no-mount compatibility check and documentation shell checks passed. The
+cloud-specific image built successfully with TLS verification and passed
+`scripts/smoke-container.sh` (health, non-root user, FFmpeg, authentication,
+destination validation and missing-token startup refusal). It produced the same
+runtime image digest recorded below. The default Dockerfile parsed locally but
+its build encountered this environment's proxy CA requirement (`UnknownIssuer`);
+the hosted CI container job builds and tests that default recipe. A successful
+Docker build or CI run does not establish a successful Railway deployment.
+
 ## Public frontend verification — 2026-10-17
 
 CI follow-up: the initial browser run failed its Escape assertion when delayed

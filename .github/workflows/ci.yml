@@ -27,6 +27,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Check Railway Dockerfile compatibility
+        run: |
+          if grep -n -- '--mount=' Dockerfile; then
+            echo 'The deployment Dockerfile must not use build mounts; keep managed-cloud mounts in Dockerfile.cloud.' >&2
+            exit 1
+          fi
       - name: Build runtime image
         run: docker build --tag youtube-extractor:ci .
       - name: Check container health, authentication, and configuration

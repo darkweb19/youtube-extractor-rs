@@ -142,6 +142,7 @@ curl --fail --silent --show-error --request DELETE \
 ### Railway
 
 1. Create a **separate service** from this GitHub repository and select the reviewed branch/commit. Keep the repository root as the build root. The supplied `railway.toml` selects the Dockerfile, `/health`, restart policy, and one replica. Let the Docker image's entry point start the service.
+   Use the default `Dockerfile`, which has no build mounts and avoids Railway's mount restrictions. `Dockerfile.cloud` is only for local managed environments that require proxy certificate mounts.
 2. Set `API_TOKEN` to a strong random secret, `ALLOW_UNAUTHENTICATED=false`, and `DATA_DIR=/data` in service variables. Railway supplies `PORT`; the application listens on `0.0.0.0:$PORT`.
    Set `UI_SECURE_COOKIES=true` for the public HTTPS frontend. If the proxy rewrites Host, set `UI_PUBLIC_ORIGIN` to the exact HTTPS origin without a trailing slash. Leave `FRONTEND_ENABLED=true` for the public generator, or set it false for API-only use.
 3. Attach a persistent volume at `/data`, sized above the configured storage budget with room for filesystem overhead (for example, 10 GiB for the default 8 GiB logical budget). Ensure UID/GID `10001:10001` can write it using the platform's supported volume initialization process. The application runs as that non-root user.
@@ -183,7 +184,7 @@ curl --fail --silent --show-error --retry 15 --retry-connrefused \
 
 For public access, put a host reverse proxy such as Caddy or Nginx in front of `127.0.0.1:8080` and terminate HTTPS there. Point your domain's DNS at the server and configure proxy timeouts for expected file transfers. The API clients then use that HTTPS origin as `BASE_URL`. The named volume persists when the container is replaced; back it up separately.
 
-For managed build environments that inject a proxy CA, use the [documented BuildKit secret mounts](docs/deployment.md#container-use). Keep TLS verification enabled.
+For managed build environments that inject a proxy CA, select `Dockerfile.cloud` with the [documented BuildKit secret mounts](docs/deployment.md#container-use). Keep TLS verification enabled. Railway and ordinary container hosts use the default `Dockerfile`.
 
 ### Render, Fly.io, and other container platforms
 

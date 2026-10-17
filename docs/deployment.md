@@ -5,6 +5,12 @@ Deploy this repository as its own Railway service. It does not need, or share co
 ## Railway setup
 
 1. Connect this repository to a new service in the intended Railway project/environment. Select its Dockerfile builder and the intended reviewed commit.
+   Keep the Dockerfile path set to `Dockerfile`, as specified by `railway.toml`.
+   It uses standard build steps without cache or secret mounts. Railway's parser
+   accepts only a restricted subset of mount syntax, so do not select the local
+   `Dockerfile.cloud` there. If an earlier deployment failed with a missing cache
+   ID or unsupported secret mount, redeploy the commit containing this portable
+   Dockerfile.
 2. Add a persistent volume mounted at `/data` and set `DATA_DIR=/data`. Arrange volume ownership so UID/GID `10001:10001` can create and delete files. The image prepares this path for ordinary Docker named volumes; an externally mounted Railway volume can have different ownership. Use the platform's supported volume initialization procedure, then keep the application non-root.
 3. Set a randomly generated `API_TOKEN` of at least 32 visible ASCII characters in Railway variables. Keep `ALLOW_UNAUTHENTICATED=false`. Set `UI_SECURE_COOKIES=true` for the HTTPS frontend. If the proxy rewrites Host, set `UI_PUBLIC_ORIGIN` to the exact external origin without a trailing slash. Do not paste credentials into source or deployment logs.
 4. Keep one replica for local storage and job ownership. Railway injects `PORT`; the service binds `0.0.0.0:$PORT`. Set resource limits and variables below before enabling public traffic. Expose an HTTPS Railway domain or private service network as appropriate.
@@ -44,11 +50,14 @@ docker run --rm --name youtube-extractor \
 
 The pinned Rust builder compiles with the lockfile. The Debian runtime installs FFmpeg, `curl` for its health check and CA roots, then runs as UID/GID `10001:10001`. No source, Rust compiler or session credentials are copied into the runtime. Base version tags are explicit; release operators should additionally lock reviewed base image digests and refresh them for security updates.
 
-In managed Codex environments, supply session CA trust through optional BuildKit secret mounts; never copy it into the image or disable TLS verification:
+The default `Dockerfile` deliberately avoids build mounts for Railway compatibility.
+In managed Codex environments, explicitly select `Dockerfile.cloud` to supply
+session CA trust through BuildKit secret mounts; never copy it into the image or
+disable TLS verification. This local variant also uses named compilation caches:
 
 ```bash
 mkdir -p /workspace/.tools/buildx
-BUILDX_CONFIG=/workspace/.tools/buildx docker build \
+BUILDX_CONFIG=/workspace/.tools/buildx docker build --file Dockerfile.cloud \
   --secret id=proxy_ca,src="$CODEX_PROXY_CERT" \
   --secret id=system_ca,src=/etc/ssl/certs/ca-certificates.crt \
   -t youtube-extractor:local .

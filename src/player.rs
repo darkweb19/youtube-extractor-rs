@@ -38,7 +38,10 @@ impl SignatureAlgorithm {
             }
             let after = rest[close + 1..].trim_start();
             if let Some(body) = block(after, '{', '}') {
-                if body.len() <= 2048 && body.contains(".split(\"\")") && body.contains(".join(\"\")") {
+                if body.len() <= 2048
+                    && body.contains(".split(\"\")")
+                    && body.contains(".join(\"\")")
+                {
                     if let Some(steps) = steps(body, parameter, script) {
                         if !steps.is_empty() && steps.len() <= 32 {
                             candidates.push(steps);
@@ -285,9 +288,12 @@ mod tests {
     #[test]
     fn only_accepts_player_script_paths() {
         assert_eq!(
-            player_script_url(r#"<script src="/s/player/cafebabe/player_ias.vflset/en_US/base.js"></script>"#).as_deref(),
+            player_script_url(r#"<script src="/s/player/cafebabe/player_ias.vflset/en_US/base.js"></script>"#)
+                .as_deref(),
             Some("https://www.youtube.com/s/player/cafebabe/player_ias.vflset/en_US/base.js")
         );
-        assert!(player_script_url(r#"<script src="/s/player/../evil/base.js"></script>"#).is_none());
+        assert!(
+            player_script_url(r#"<script src="/s/player/../evil/base.js"></script>"#).is_none()
+        );
     }
 }

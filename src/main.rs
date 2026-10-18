@@ -5,8 +5,8 @@ use youtube_extractor::{
     config::Config,
     jobs::{JobManager, JobSettings},
     media::Ffmpeg,
-    ytdlp::YtDlp,
     storage::LocalStorage,
+    ytdlp::YtDlp,
 };
 
 #[tokio::main]
@@ -47,7 +47,7 @@ async fn run() -> youtube_extractor::error::Result<()> {
             ttl: config.job_ttl,
             timeout: config.download_timeout,
         },
-        pipeline,
+        pipeline.clone(),
     )
     .await?;
     let app = api::router(ApiState::new(config.clone(), pipeline, jobs.clone()));

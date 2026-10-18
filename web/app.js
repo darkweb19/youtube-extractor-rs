@@ -286,7 +286,19 @@ function terminalError(job) {
   $('empty-state').hidden = false;
   storeJob(null);
   setBusy(false);
-  const message = job.status === 'cancelled' ? 'Generation was cancelled. You can choose a video and try again.' : `${job.error?.message || 'The video could not be generated.'} Check the link or try another video.`;
+  const guidance = {
+    ACCESS_RESTRICTED: 'This service cannot download videos that require consent, sign-in or access verification.',
+    NETWORK: 'The server could not connect to YouTube. Try again later.',
+    DNS: 'The server could not resolve a YouTube address. Try again later.',
+    TIMEOUT: 'The server could not finish in time. Try again later.',
+    UNSUPPORTED_FORMAT: 'The service cannot generate this format. A different public video may have a supported MP4 stream.',
+    PLAYER_CHANGED: 'The service needs an update to support this YouTube response.',
+    UPSTREAM_RATE_LIMITED: 'YouTube has limited requests from this service. Wait before trying again.',
+    INVALID_REQUEST: 'Check that the link points to a supported public YouTube video.',
+  }[job.error?.code];
+  const detail = typeof job.error?.message === 'string' && job.error.message ? job.error.message : 'The video could not be generated.';
+  const message = job.status === 'cancelled' ? 'Generation was cancelled. You can choose a video and try again.'
+    : guidance ? `${detail} ${guidance}` : detail;
   showError(message);
   $('error-message').tabIndex = -1;
   $('error-message').focus({ preventScroll: true });

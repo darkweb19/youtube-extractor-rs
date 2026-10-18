@@ -48,6 +48,7 @@ Source: user request for the two-stage confirmation and result; server contracts
 - Superseded flows and page hide abort outstanding requests; stale job responses cannot replace the selected job. BFCache restoration initializes/rechecks the current session.
 - Only the current opaque job ID is stored in sessionStorage, guarded for unavailable storage. Reload rechecks that job through the same ownership guard. No links, tokens, or file blobs are persisted.
 - Backend copy is rendered as text. Media error/stall and preview load/error failures use the same toast system and persistent contextual copy. YouTube preview events must match both iframe source and exact trusted origin.
+- Terminal generation failures retain the backend message and add recovery guidance by error code. Upstream network/DNS/timeouts explain the server connection problem; access restrictions explain that the service cannot download videos requiring consent, sign-in or verification. Neither blames the submitted link or triggers a retry. Unsupported formats explain the extraction limitation, and only invalid-request errors suggest checking the link.
 
 ## Accessibility and layout
 

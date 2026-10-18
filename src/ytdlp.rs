@@ -321,6 +321,32 @@ mod tests {
         assert_eq!(info.formats.len(), 2);
         assert!(!serde_json::to_string(&info).unwrap().contains("private"));
     }
+    #[tokio::test]
+    async fn mp4_selector_caps_height_and_requires_matching_audio_container() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = LocalStorage::new(temp.path().join("jobs")).await.unwrap();
+        let worker = YtDlp::new(
+            "yt-dlp".into(),
+            storage,
+            Ffmpeg::new("ffmpeg".into(), "ffprobe".into(), Duration::from_secs(1)),
+            Duration::from_secs(3),
+            1_024_000,
+        );
+        let request = DownloadRequest {
+            url: "https://youtu.be/SAFrydhpgJo".into(),
+            kind: DownloadKind::Video,
+            format: OutputFormat::Mp4,
+            quality: Some("720p".into()),
+            audio_bitrate_kbps: None,
+        };
+        let command = worker.download_command(&request, temp.path()).unwrap();
+        let args: Vec<_> = command.as_std().get_args().map(|a| a.to_string_lossy()).collect();
+        assert!(args.iter().any(|arg| arg.contains("bv[ext=mp4][height<=720]+ba[ext=m4a]")));
+        assert!(args.iter().any(|arg| arg == "--"));
+        assert!(args.iter().any(|arg| arg == "https://www.youtube.com/watch?v=SAFrydhpgJo"));
+        assert!(!args.iter().any(|arg| arg.contains("youtu.be")));
+    }
+
     #[test]
     fn rejects_mismatched_id_and_invalid_json() {
         let id = VideoId::new(ID).unwrap();

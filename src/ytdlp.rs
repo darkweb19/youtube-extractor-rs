@@ -310,4 +310,78 @@ mod tests {
     fn rejects_non_youtube_input_before_process_spawn() {
         assert!(normalize_url("https://127.0.0.1/private").is_err());
     }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn invokes_ytdlp_with_normalized_url_and_ignores_titles_as_filenames() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let program = temp.path().join("mock-yt-dlp");
+        let invoked = temp.path().join("args");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s\\n' '{{\"id\":\"SAFrydhpgJo\",\"title\":\"../../unsafe title\",\"formats\":[{{\"format_id\":\"136\",\"ext\":\"mp4\",\"vcodec\":\"avc1\",\"acodec\":\"none\"}}]}}'\n",
+            invoked.display()
+        );
+        tokio::fs::write(&program, script).await.unwrap();
+        let mut permissions = tokio::fs::metadata(&program).await.unwrap().permissions();
+        permissions.set_mode(0o700);
+        tokio::fs::set_permissions(&program, permissions).await.unwrap();
+        let storage = LocalStorage::new(temp.path().join("jobs")).await.unwrap();
+        let worker = YtDlp::new(
+            program,
+            storage,
+            Ffmpeg::new("ffmpeg".into(), "ffprobe".into(), Duration::from_secs(3)),
+            Duration::from_secs(3),
+            1024 * 1024,
+        );
+        let info = worker
+            .video_info("https://youtu.be/SAFrydhpgJo?si=anything")
+            .await
+            .unwrap();
+        assert_eq!(info.title, "../../unsafe title");
+        let args = tokio::fs::read_to_string(invoked).await.unwrap();
+        assert!(args.contains("--ignore-config"));
+        assert!(args.contains("--remote-components"));
+        assert!(args.contains("https://www.youtube.com/watch?v=SAFrydhpgJo"));
+        assert!(!args.contains("youtu.be"));
+        assert!(!args.contains("anything"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellation_terminates_ytdlp_and_cleans_temp_job() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let program = temp.path().join("mock-yt-dlp");
+        tokio::fs::write(&program, "#!/bin/sh\nexec sleep 30\n").await.unwrap();
+        let mut permissions = tokio::fs::metadata(&program).await.unwrap().permissions();
+        permissions.set_mode(0o700);
+        tokio::fs::set_permissions(&program, permissions).await.unwrap();
+        let storage = LocalStorage::new(temp.path().join("jobs")).await.unwrap();
+        let worker = YtDlp::new(
+            program,
+            storage.clone(),
+            Ffmpeg::new("ffmpeg".into(), "ffprobe".into(), Duration::from_secs(3)),
+            Duration::from_secs(3),
+            1024 * 1024,
+        );
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let (tx, _rx) = watch::channel(DownloadProgress::default());
+        let id = Uuid::new_v4();
+        let request = DownloadRequest {
+            url: "https://youtube.com/watch?v=SAFrydhpgJo".into(),
+            kind: DownloadKind::Video,
+            format: OutputFormat::Mp4,
+            quality: Some("720p".into()),
+            audio_bitrate_kbps: None,
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            worker.run(&request, id, cancelled, tx),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.unwrap_err().code, ErrorCode::Cancelled);
+        assert!(!storage.job_dir(id).exists());
+    }
 }

@@ -352,6 +352,31 @@ test('terminal extractor errors appear in toast and inline without a result', as
   assert.equal(await page.locator('#result-panel').isVisible(), false);
 });
 
+for (const [code, message, guidance] of [
+  ['UNSUPPORTED_FORMAT', 'Upstream destination is not an allowed HTTPS YouTube endpoint', /cannot generate this format/],
+  ['ACCESS_RESTRICTED', 'YouTube requires consent, sign-in or automated-access verification', /cannot download videos that require consent/],
+  ['NETWORK', 'Upstream request was blocked by the server network policy', /server could not connect to YouTube/],
+  ['DNS', 'Upstream DNS lookup failed', /server could not resolve a YouTube address/],
+  ['TIMEOUT', 'Upstream request timed out', /server could not finish in time/],
+]) {
+  test(`terminal ${code} preserves backend reason and gives relevant recovery without blaming the link`, async t => {
+    const { page } = await setup(t, { fixture: { jobError: { code, message } } });
+    await generate(page);
+    await page.locator('#inline-error:not([hidden])').waitFor();
+    const inline = await page.locator('#error-message').innerText();
+    assert.ok(inline.startsWith(message), 'Backend error is retained');
+    assert.match(inline, guidance);
+    assert.doesNotMatch(inline, /check the link|check your connection|try another video/i);
+    assert.equal(await page.locator('#toast-region p').innerText(), inline, 'Toast and persistent error give the same guidance');
+    assert.equal(await page.locator('#result-panel').isVisible(), false);
+    assert.equal(await page.locator('#retry-status').isVisible(), false, 'Terminal failure cannot retry the failed job');
+    assert.equal(await page.locator('#youtube-url').inputValue(), source, 'Input is preserved');
+    await page.waitForTimeout(200);
+    assert.equal(state.creates, 1, 'No automatic generation retry');
+    assert.equal(state.polls, 1, 'No automatic terminal-status retry');
+  });
+}
+
 test('mobile, zoom and reduced motion remain usable without horizontal overflow', async t => {
   const { page } = await setup(t, { context: { viewport: { width: 375, height: 812 }, reducedMotion: 'reduce' } });
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));

@@ -3,7 +3,7 @@
 use std::{path::{Path, PathBuf}, process::Stdio, time::Duration};
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::{process::Command, sync::watch};
+use tokio::{io::AsyncReadExt, process::Command, sync::watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use crate::{
@@ -46,18 +46,39 @@ impl YtDlp {
         let mut cmd = self.command();
         cmd.args(["--dump-single-json", "--skip-download"]);
         cmd.arg("--").arg(format!("https://www.youtube.com/watch?v={id}"));
-        let output = tokio::time::timeout(self.timeout.min(Duration::from_secs(90)), cmd.output())
-            .await
-            .map_err(|_| AppError::new(ErrorCode::Timeout, "YouTube metadata request timed out"))?
+        const MAX_METADATA_BYTES: usize = 8 * 1024 * 1024;
+        cmd.stdout(Stdio::piped());
+        let mut child = cmd.spawn()
             .map_err(|_| AppError::new(ErrorCode::Internal, "yt-dlp executable is unavailable"))?;
-        if !output.status.success() {
-            return Err(AppError::new(ErrorCode::AccessRestricted,
-                "yt-dlp could not retrieve video metadata; public access may be restricted"));
+        let stdout = child.stdout.take()
+            .ok_or_else(|| AppError::new(ErrorCode::Internal, "yt-dlp metadata pipe is unavailable"))?;
+        let read = async {
+            let mut bytes = Vec::new();
+            stdout.take((MAX_METADATA_BYTES + 1) as u64)
+                .read_to_end(&mut bytes).await
+                .map_err(|_| AppError::new(ErrorCode::Network, "Failed to read yt-dlp metadata"))?;
+            if bytes.len() > MAX_METADATA_BYTES {
+                return Err(AppError::new(ErrorCode::PlayerChanged,
+                    "yt-dlp metadata exceeded the response size limit"));
+            }
+            let status = child.wait().await
+                .map_err(|_| AppError::new(ErrorCode::DownloadInterrupted, "yt-dlp metadata worker failed"))?;
+            if !status.success() {
+                return Err(AppError::new(ErrorCode::AccessRestricted,
+                    "yt-dlp could not retrieve metadata; the server may be restricted by YouTube"));
+            }
+            Ok(bytes)
+        };
+        let outcome = tokio::time::timeout(self.timeout.min(Duration::from_secs(90)), read).await;
+        let result = match outcome {
+            Ok(result) => result,
+            Err(_) => Err(AppError::new(ErrorCode::Timeout, "YouTube metadata request timed out")),
+        };
+        if result.is_err() {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
         }
-        if output.stdout.len() > 8 * 1024 * 1024 {
-            return Err(AppError::new(ErrorCode::PlayerChanged, "yt-dlp metadata response exceeded the size limit"));
-        }
-        parse_info(&output.stdout, id)
+        parse_info(&result?, id)
     }
 
     fn download_command(&self, request: &DownloadRequest, dir: &Path) -> Result<Command> {

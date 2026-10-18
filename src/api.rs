@@ -207,19 +207,24 @@ async fn health(State(state): State<ApiState>) -> Response {
         let probe = std::env::var_os("FFPROBE_PATH")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| "ffprobe".into());
-        for binary in [&state.config.ffmpeg_path, &probe] {
+        for binary in [
+            &state.config.ffmpeg_path,
+            &probe,
+            &state.config.yt_dlp_path,
+            &state.config.deno_path,
+        ] {
             let output = tokio::process::Command::new(binary)
                 .arg("-version")
                 .kill_on_drop(true)
                 .output()
                 .await
                 .map_err(|_| {
-                    AppError::new(ErrorCode::FfmpegFailed, "Media tools are unavailable")
+                    AppError::new(ErrorCode::Internal, "Media or extraction tools are unavailable")
                 })?;
             if !output.status.success() {
                 return Err(AppError::new(
-                    ErrorCode::FfmpegFailed,
-                    "Media tool readiness check failed",
+                    ErrorCode::Internal,
+                    "Media/extraction tool readiness check failed",
                 ));
             }
         }

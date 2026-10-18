@@ -10,3 +10,4 @@ pub mod model;
 pub mod network;
 pub mod player;
 pub mod storage;
+pub mod ytdlp;

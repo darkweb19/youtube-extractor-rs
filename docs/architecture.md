@@ -1,9 +1,12 @@
 # Architecture and operational assumptions
 
-This is one independently deployable Rust service. Its native extractor discovers
-YouTube player metadata and supported media URLs; FFmpeg only processes media
-that the downloader has already fetched into local files. No Python or Node
-backend, downloader executable, or third-party YouTube extraction engine is used.
+This is one independently deployable Rust/Axum service. In the production path,
+a managed `yt-dlp` subprocess handles YouTube extraction, stream transfer and
+FFmpeg-based merge/extraction. Deno provides the maintained EJS runtime; Rust
+handles bearer authentication, URL normalization, job admission and queue,
+cancellation, workspace byte budgets, FFprobe output checks, storage and file
+delivery. The former native parser/downloader is retained as testable legacy
+code but is not the production job executor.
 
 ## Workload and reliability assumptions
 
@@ -52,32 +55,32 @@ before horizontally scaling one shared job namespace.
 | `config` | Startup validation of secrets, timeouts, concurrency and retention budgets |
 | `error` | Stable machine error codes and JSON error responses |
 | `model` | Public metadata, requests, formats, and job response types |
-| `extractor` | URL normalization, player-response parsing, supported stream discovery |
-| `network` | Allowlisted destinations, DNS/address checks, redirects, upstream classification |
-| `download` | Format selection, bounded streaming, retries and progress |
-| `media` | Local-file FFmpeg mux/remux/transcode with cancellation and timeout |
+| `extractor` | URL normalization; legacy native parser retained for fixtures |
+| `network` | Legacy native transport; yt-dlp now owns its upstream HTTPS requests |
+| `download` | Legacy native streaming and shared progress types |
+| `media` | Local-file FFprobe validation; yt-dlp invokes FFmpeg for remuxing |
+| `ytdlp` | Managed extractor subprocess, safe argument construction, bounded workspace monitoring, output verification |
 | `storage` | Managed local paths, completed output, cleanup and durable local records |
 | `jobs` | Admission, bounded execution, state transitions, cancellation and retention |
 
-The common extractor trait keeps protocol changes independent from job and API
-code. The native implementation owns parsing; the download manager never
-executes player JavaScript or changes identities to evade an upstream denial.
-Signed upstream URLs and cipher fields are deliberately omitted from public
-format serialization.
+The common extractor trait keeps metadata independent from the Axum API.
+The production implementation delegates extraction and transfer to yt-dlp.
+Every supplied URL is normalized into a single YouTube video ID and reconstructed
+before crossing the subprocess boundary. No shell interpolation or user-derived
+output paths are used. Metadata format URLs are deliberately omitted from API
+serialization. yt-dlp and Deno remain external processes that must be sandboxed
+with container CPU, memory and PID limits.
 
 ```mermaid
 flowchart LR
-  Caller -->|Bearer token| API[Axum API]
-  API -->|info| Extractor[Native extractor]
-  API -->|submit/status/cancel| Jobs[Bounded job manager]
-  Jobs --> Extractor
-  Jobs --> Download[Streaming downloader]
-  Extractor --> Network[Validated outbound HTTP]
-  Download --> Network
-  Download --> Media[FFmpeg on local files]
-  Media --> Storage[Managed local storage]
-  Jobs --> Storage
-  API -->|authenticated file delivery| Storage
+  User -->|Bearer token| API[Axum API]
+  API -->|metadata| YTDLP[yt-dlp and Deno]
+  API -->|submit/status/cancel| Jobs[Bounded Rust jobs]
+  Jobs --> YTDLP
+  YTDLP -->|local FFmpeg merge| Files[Job workspace]
+  Files --> Probe[FFprobe validation]
+  Probe --> Storage[Managed local volume]
+  API -->|authenticated file download| Storage
 ```
 
 ## Job and resource lifecycle

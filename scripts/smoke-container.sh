@@ -23,6 +23,9 @@ done
 if [[ "$ready" != true ]]; then docker logs "$container_id"; echo 'Container did not become healthy' >&2; exit 1; fi
 [[ "$(docker inspect --format '{{.Config.User}}' "$container_id")" == '10001:10001' ]]
 docker exec "$container_id" ffmpeg -version > /dev/null
+docker exec "$container_id" ffprobe -version > /dev/null
+docker exec "$container_id" /opt/ytdlp/bin/yt-dlp --version > /dev/null
+docker exec "$container_id" deno --version > /dev/null
 status="$(curl --silent --output "$work_dir/error.json" --write-out '%{http_code}' --header 'Content-Type: application/json' --data '{}' "$base_url/api/v1/videos/info")"
 [[ "$status" == '401' ]]
 python3 - "$work_dir/error.json" <<'PY'
@@ -45,4 +48,4 @@ for _ in $(seq 1 15); do
 done
 [[ "$(docker inspect --format '{{.State.Running}}' "$missing_token_id")" == 'false' ]]
 [[ "$(docker inspect --format '{{.State.ExitCode}}' "$missing_token_id")" != '0' ]]
-echo 'PASS: container health, non-root runtime, FFmpeg, auth, SSRF rejection, and missing-token startup refusal'
+echo 'PASS: container health, non-root runtime, FFmpeg, yt-dlp, Deno, auth, SSRF rejection, and missing-token startup refusal'

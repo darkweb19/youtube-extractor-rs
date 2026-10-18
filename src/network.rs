@@ -102,7 +102,7 @@ impl SafeHttpClient {
             #[cfg(not(test))]
             let is_test = false;
             if !is_test {
-                validate_destination(&url, destination)?;
+                validate_request_destination(&url, destination, attempt > 0)?;
             }
             let mut builder = Client::builder()
                 .redirect(Policy::none())
@@ -239,7 +239,7 @@ pub fn map_reqwest_error(error: reqwest::Error) -> AppError {
 pub fn validate_media_url(input: &str) -> Result<Url> {
     let url = Url::parse(input)
         .map_err(|_| AppError::new(ErrorCode::UnsupportedFormat, "Invalid media URL"))?;
-    validate_destination(&url, Destination::Media)?;
+    validate_request_destination(&url, Destination::Media, false)?;
     Ok(url)
 }
 
@@ -251,17 +251,86 @@ pub fn validate_destination(url: &Url, destination: Destination) -> Result<()> {
             host.ends_with(".googlevideo.com") && host.len() > ".googlevideo.com".len()
         }
     };
-    if url.scheme() != "https"
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.port().is_some()
-        || !allowed
-        || url.fragment().is_some()
-    {
-        return Err(AppError::new(
-            ErrorCode::UnsupportedFormat,
-            "Upstream destination is not an allowed HTTPS YouTube endpoint",
-        ));
+    if !is_plain_https_endpoint(url) || !allowed {
+        let (code, message) = match destination {
+            Destination::Youtube => (
+                ErrorCode::Network,
+                "YouTube metadata endpoint is not permitted by this service's outbound policy",
+            ),
+            Destination::Media => (
+                ErrorCode::UnsupportedFormat,
+                "YouTube returned a media URL outside the permitted HTTPS media hosts",
+            ),
+        };
+        return Err(AppError::new(code, message));
+    }
+    Ok(())
+}
+
+fn is_plain_https_endpoint(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.fragment().is_none()
+}
+
+/// Recognize access gates only to explain a refusal, never to authorize another host.
+fn access_gate(url: &Url) -> Option<&'static str> {
+    if !is_plain_https_endpoint(url) {
+        return None;
+    }
+    match url.host_str()? {
+        "consent.youtube.com" | "consent.google.com" => Some(
+            "YouTube requires interactive consent before serving this video. This service cannot complete consent checks",
+        ),
+        "accounts.google.com" => Some(
+            "YouTube requires sign-in before serving this video. This service cannot access videos requiring authentication",
+        ),
+        "sorry.google.com" => Some(
+            "YouTube requires a browser verification challenge from this deployment. This service cannot complete verification challenges",
+        ),
+        "www.google.com" if url.path() == "/sorry" || url.path().starts_with("/sorry/") => Some(
+            "YouTube requires a browser verification challenge from this deployment. This service cannot complete verification challenges",
+        ),
+        "youtube.com" | "www.youtube.com" | "m.youtube.com"
+            if url.path() == "/signin" || url.path().starts_with("/signin/") => Some(
+            "YouTube requires sign-in before serving this video. This service cannot access videos requiring authentication",
+        ),
+        _ => None,
+    }
+}
+
+fn validate_request_destination(
+    url: &Url,
+    destination: Destination,
+    redirected: bool,
+) -> Result<()> {
+    let error = if redirected {
+        if let Some(message) = access_gate(url) {
+            Some(AppError::new(ErrorCode::AccessRestricted, message))
+        } else {
+            validate_destination(url, destination).err().map(|_| {
+                let message = match destination {
+                    Destination::Youtube => "YouTube redirected metadata to an endpoint this service does not permit. Check deployment logs for the rejected host",
+                    Destination::Media => "YouTube redirected media to an endpoint this service does not permit. Check deployment logs for the rejected host",
+                };
+                AppError::new(ErrorCode::Network, message)
+            })
+        }
+    } else {
+        validate_destination(url, destination).err()
+    };
+    if let Some(error) = error {
+        // Never log paths, queries, Location headers, or signed media URLs.
+        tracing::warn!(
+            stage = match destination { Destination::Youtube => "metadata", Destination::Media => "media" },
+            phase = if redirected { "redirect" } else { "initial" },
+            destination_host = url.host_str().unwrap_or("missing"),
+            error_code = ?error.code,
+            "Rejected upstream destination"
+        );
+        return Err(error);
     }
     Ok(())
 }
@@ -328,24 +397,30 @@ fn is_public_ip(ip: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    async fn fixture(response: &'static str) -> (String, tokio::task::JoinHandle<()>) {
+    async fn fixture(response: impl Into<String>) -> (String, tokio::task::JoinHandle<()>) {
+        fixture_chain(vec![response.into()]).await
+    }
+
+    async fn fixture_chain(responses: Vec<String>) -> (String, tokio::task::JoinHandle<()>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let task = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0u8; 4096];
-            let mut used = 0;
-            while !request[..used].windows(4).any(|part| part == b"\r\n\r\n") {
-                assert!(used < request.len(), "fixture request headers too large");
-                let received = stream.read(&mut request[used..]).await.unwrap();
-                assert!(
-                    received > 0,
-                    "fixture request closed before complete headers"
-                );
-                used += received;
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                let mut used = 0;
+                while !request[..used].windows(4).any(|part| part == b"\r\n\r\n") {
+                    assert!(used < request.len(), "fixture request headers too large");
+                    let received = stream.read(&mut request[used..]).await.unwrap();
+                    assert!(
+                        received > 0,
+                        "fixture request closed before complete headers"
+                    );
+                    used += received;
+                }
+                stream.write_all(response.as_bytes()).await.unwrap();
             }
-            stream.write_all(response.as_bytes()).await.unwrap();
         });
         (origin, task)
     }
@@ -357,8 +432,141 @@ mod tests {
             .get(&origin, Destination::Media)
             .await
             .unwrap_err();
-        assert_eq!(error.code, ErrorCode::UnsupportedFormat);
+        assert_eq!(error.code, ErrorCode::Network);
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn redirect_chain_rejects_destination_before_any_connection() {
+        let denied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let responses = vec![
+            "HTTP/1.1 302 Found\r\nLocation: /next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
+            format!("HTTP/1.1 302 Found\r\nLocation: http://{}/private?signature=DO_NOT_EXPOSE\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", denied.local_addr().unwrap()),
+        ];
+        let (origin, task) = fixture_chain(responses).await;
+        let error = SafeHttpClient::for_test_origin(&origin)
+            .get(&origin, Destination::Youtube)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Network);
+        assert!(error.message.contains("redirected metadata"));
+        assert!(!error.message.contains("DO_NOT_EXPOSE"));
+        task.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), denied.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn interactive_redirects_are_classified_without_following_them() {
+        for (target, expected) in [
+            (
+                "https://consent.youtube.com/m?continue=DO_NOT_EXPOSE",
+                "consent",
+            ),
+            (
+                "https://consent.google.com/m?continue=DO_NOT_EXPOSE",
+                "consent",
+            ),
+            (
+                "https://accounts.google.com/ServiceLogin?continue=DO_NOT_EXPOSE",
+                "sign-in",
+            ),
+            (
+                "https://www.google.com/sorry/index?continue=DO_NOT_EXPOSE",
+                "verification challenge",
+            ),
+            (
+                "https://sorry.google.com/?continue=DO_NOT_EXPOSE",
+                "verification challenge",
+            ),
+            (
+                "https://www.youtube.com/signin?continue=DO_NOT_EXPOSE",
+                "sign-in",
+            ),
+        ] {
+            let (origin, task) = fixture(format!("HTTP/1.1 302 Found\r\nLocation: {target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")).await;
+            let error = SafeHttpClient::for_test_origin(&origin)
+                .get(&origin, Destination::Youtube)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::AccessRestricted, "{target}");
+            assert!(error.message.contains(expected));
+            assert!(!error.message.contains("DO_NOT_EXPOSE"));
+            task.await.unwrap();
+        }
+    }
+
+    #[test]
+    fn access_gate_recognition_never_permits_additional_hosts_or_unsafe_urls() {
+        for target in [
+            "https://consent.youtube.com.evil.invalid/m",
+            "https://consent.youtube.com./m",
+            "https://accounts.google.com.evil.invalid/ServiceLogin",
+            "https://www.google.com/sorry-looking",
+            "https://www.google.com/search",
+            "http://consent.youtube.com/m",
+            "https://consent.youtube.com:444/m",
+            "https://user@consent.youtube.com/m",
+            "https://user:password@accounts.google.com/ServiceLogin",
+            "https://consent.youtube.com/m#fragment",
+        ] {
+            let url = Url::parse(target).unwrap();
+            assert!(access_gate(&url).is_none(), "{target}");
+            assert_eq!(
+                validate_request_destination(&url, Destination::Youtube, true)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Network,
+                "{target}"
+            );
+        }
+        for target in [
+            "https://consent.youtube.com/m",
+            "https://accounts.google.com/ServiceLogin",
+        ] {
+            let url = Url::parse(target).unwrap();
+            assert!(validate_destination(&url, Destination::Youtube).is_err());
+            assert!(validate_destination(&url, Destination::Media).is_err());
+        }
+    }
+
+    #[test]
+    fn rejected_destination_diagnostics_include_only_stage_host_and_classification() {
+        use std::sync::{Arc, Mutex};
+        struct Writer(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Writer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let captured = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || Writer(captured.clone()))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let url =
+                Url::parse("https://consent.youtube.com/PRIVATE_PATH?signature=PRIVATE_SIGNATURE")
+                    .unwrap();
+            let error = validate_request_destination(&url, Destination::Youtube, true).unwrap_err();
+            assert!(!error.message.contains("PRIVATE_"));
+        });
+        let output = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("metadata"));
+        assert!(output.contains("redirect"));
+        assert!(output.contains("consent.youtube.com"));
+        assert!(output.contains("AccessRestricted"));
+        assert!(!output.contains("PRIVATE_"));
+        assert!(!output.contains("signature"));
     }
 
     #[tokio::test]

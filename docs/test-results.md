@@ -1,5 +1,37 @@
 # Verification results
 
+## Upstream destination handling — 2026-10-17
+
+Reproduced a parser defect with a synthetic mixed-destination player response:
+one invalid direct/cipher candidate aborted extraction despite another valid
+direct stream. Candidate-local failures are now isolated, and strict URL checks
+still exclude unsafe candidates from selection and downloading. The generic
+destination error also covered redirected metadata/media; controlled redirect
+fixtures now distinguish exact consent/sign-in/verification gates from other
+blocked destinations and verify rejection before connection. Logs include only
+stage, phase, normalized hostname and error code. The exact rejected destination
+in the earlier Railway incident has not been observed.
+
+| Check | Result | Evidence and limits |
+| --- | --- | --- |
+| Formatting, strict Clippy, native build | Passed | Locked dependencies; no lint warnings |
+| Complete deterministic Rust suite | Passed | 60 tests: 41 library, 4 API, 3 selection, 4 media/storage, 8 web; one external probe ignored by default |
+| Complete browser suite | Passed | 24 tests on Node 22/Chromium, including five terminal-error recovery regressions; syntax also passed |
+| Premium UI strict audit | Passed | Zero findings; behavior/copy changes only |
+| Multi-stage cloud Docker build | Passed | TLS verification retained; `Dockerfile.cloud` uses temporary CA mounts |
+| Container smoke | Passed | Health, non-root user, FFmpeg, private API auth, destination validation and missing-token startup refusal |
+| Packaged Rust/browser integration | Passed | Supplied URL accepted, preview before one real POST, actual failed job produces the typed `NETWORK` toast without blaming the link; private API remains authenticated, no bearer header/CSP violation/browser exception. Player transport controlled; this verifies honest failure, not live extraction. |
+| Documentation checks | Passed | Local links and 17 Bash examples |
+| Specific live metadata probe | Failed: external prerequisite | `https://www.youtube.com/watch?v=scwlR0QHGOk` is accepted as an input, but the native probe fails with `NETWORK`; curl independently reports proxy CONNECT HTTP 403 before YouTube is contacted |
+| Actual download / deployed Railway result | Unverified | Controlled fixtures do not establish upstream access or successful extraction from the deployment |
+
+Built local image:
+`sha256:bd4318e18fbe9ebfeb70fb604130b8e32d40e84abb35f2495ab0d05ad805cb85`
+(547,595,179 bytes uncompressed). No registry publication or Railway deployment
+was performed. Existing JavaScript `s`/`n`, DRM, access-gate and manifest-only
+limitations remain in force. See [protocol support](protocol-support.md) and
+[deployment diagnostics](deployment.md#upstream-extraction-diagnostics).
+
 ## Railway browser-origin correction — 2026-10-17
 
 Origin inference previously assumed HTTP when secure cookies were unset, causing

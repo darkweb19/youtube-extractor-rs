@@ -230,6 +230,16 @@ The storage budget can reject admission before the queue fills. A remux usually 
 | `UNSUPPORTED_FORMAT` | Supported codecs/protocols; JavaScript `s`/`n` transforms and manifest delivery are not implemented |
 | `QUEUE_FULL` / `RATE_LIMITED` | Worker, queue, storage, retention, and request-rate limits; back off before retrying |
 
+If generation reports a rejected upstream endpoint, check the Railway log entry
+**Rejected upstream destination**. Its `stage` (`metadata` or `media`), `phase`
+(`initial` or `redirect`), `destination_host` and `error_code` distinguish a
+blocked redirect from an unusable stream candidate. Signed URLs and query values
+are omitted. Consent/sign-in/verification redirects are terminal access failures;
+the service does not follow or bypass them. Rejected stream candidates are
+ignored when another validated direct format is available. See the
+[Railway diagnostics](docs/deployment.md#upstream-extraction-diagnostics) and
+[protocol contract](docs/protocol-support.md) before changing endpoint policy.
+
 ## Development and verification
 
 Browser checks use Node.js 22+ and a dev-only Playwright dependency. This tooling

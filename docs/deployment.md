@@ -18,6 +18,43 @@ Deploy this repository as its own Railway service. It does not need, or share co
 
 The public health route probes local readiness, not YouTube reachability. A healthy deployment may still be denied by YouTube's data-center IP policy. Do not route external verification through a different network and report it as Railway success.
 
+## Upstream extraction diagnostics
+
+The browser shows the job's safe backend error followed by guidance for its
+error code. A valid YouTube input can fail later while fetching metadata,
+following a redirect, or resolving media; changing the pasted link does not
+establish which phase failed.
+
+1. Locate **Rejected upstream destination** in the service logs. It records
+   `stage` (`metadata`/`media`), `phase` (`initial`/`redirect`),
+   `destination_host` and `error_code`. It intentionally omits paths, queries,
+   signed URLs, credentials and upstream bodies. Share only these safe fields
+   and the terminal job error when reporting a failure.
+2. `ACCESS_RESTRICTED` on a consent, sign-in or verification redirect means
+   YouTube required an interactive step. The service refuses the target before
+   connection. Keep that failure explicit; do not add those hosts to the media
+   allowlist or try to automate the access check.
+3. `NETWORK` on an unrecognized metadata/media redirect means the target remains
+   outside the endpoint policy. Inspect the recorded hostname before considering
+   a separately reviewed compatibility change. Do not allow arbitrary hosts or
+   disable HTTPS/DNS validation to suppress the error.
+4. A media `initial` warning can describe one rejected candidate in a larger
+   response. It is not by itself a failed job: other validated direct streams
+   remain eligible. Use the job's terminal status to distinguish a completed
+   result from `UNSUPPORTED_FORMAT` when no usable candidate remains.
+5. Once metadata succeeds, use the existing opted-in
+   `scripts/smoke-railway.sh` flow for an authorized video to verify actual MP3
+   and MP4 bytes from that deployment. Retain typed failures when blocked;
+   local fixtures and `/health` do not establish live extraction.
+
+The previously shared message **Upstream destination is not an allowed HTTPS
+YouTube endpoint** covered several distinct rejection paths. New releases
+separate these failures and isolate unusable media candidates. The exact cause
+of an older deployment's error requires its logs; the wording alone does not
+prove that the link was invalid or that YouTube allowed access from that host.
+
+## Public frontend configuration
+
 If the frontend reports **Request origin does not match this service**, set
 `UI_PUBLIC_ORIGIN` to the exact browser origin (for example,
 `https://your-service.up.railway.app`) and `UI_SECURE_COOKIES=true`, then redeploy.

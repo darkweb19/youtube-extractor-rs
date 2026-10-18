@@ -14,7 +14,7 @@ Credentials, custom ports, unsupported hosts/paths, encoded or dot-normalized pa
 
 The parser locates an assignment to `ytInitialPlayerResponse`, including the `window["ytInitialPlayerResponse"] = ...` form. It extracts one balanced JSON object while respecting quoted strings and escaped characters, then deserializes typed player fields. This is an assignment-marker scan, not a general HTML/JavaScript parser. It may identify a marker inside unrelated upstream text, and a page using another representation can fail. The parser does not evaluate JavaScript, repair malformed JSON, or guess an undocumented API request as a fallback. The response video ID must match the requested ID.
 
-The HTTP body is bounded before parsing; main currently supplies a 4 MiB limit. Serde's normal recursion limit remains enabled. Redirects are bounded and each destination is validated. A direct connection resolves and pins only public IP addresses; an explicitly inherited outbound proxy owns destination DNS and must itself enforce safe egress. No automatic redirect, cookie jar, custom user authentication, or alternate outbound identity is used. Injected proxy and TLS trust settings are preserved.
+The HTTP body is bounded before parsing; main currently supplies a 4 MiB limit. Serde's normal recursion limit remains enabled. Redirects are bounded and each destination is validated before DNS or connection. Recognized HTTPS consent, sign-in and verification redirects return `ACCESS_RESTRICTED` without fetching the access gate. Other redirects outside the endpoint policy return `NETWORK`; they do not authorize additional hosts. A direct connection resolves and pins only public IP addresses; an explicitly inherited outbound proxy owns destination DNS and must itself enforce safe egress. No automatic redirect, cookie jar, custom user authentication, or alternate outbound identity is used. Injected proxy and TLS trust settings are preserved.
 
 ## Metadata and direct streams
 
@@ -34,9 +34,9 @@ The supported typed fields are:
 
 A format needs an allowed HTTPS URL on a subdomain of `googlevideo.com`. MP4 video, MP4 audio exposed as M4A, and WebM audio/video MIME types are supported. Signed URLs remain internal and are not serialized in the public metadata or job API. The original signed query is preserved; the service does not mint signatures.
 
-A `signatureCipher`/`cipher` containing a URL and an already supplied `sig` or `signature` can be decoded as URL-encoded fields. Only the `sig` or `signature` destination parameter is accepted. A cipher containing `s` is skipped because it requires an unimplemented transform. A media URL containing `n` is also skipped because its current throttling transform is unimplemented. Unknown MIME formats are skipped. Invalid media destinations fail explicitly rather than being fetched.
+A `signatureCipher`/`cipher` containing a URL and an already supplied `sig` or `signature` can be decoded as URL-encoded fields. Only the `sig` or `signature` destination parameter is accepted. A cipher containing `s` is skipped because it requires an unimplemented transform. A media URL containing `n` is also skipped because its current throttling transform is unimplemented. Unknown MIME formats are skipped. Invalid media destinations and malformed candidate-local cipher fields are discarded rather than fetched or passed to format selection. One rejected candidate does not discard independently validated direct formats elsewhere in the response, regardless of candidate order.
 
-A successful metadata response contains at least one supported direct format. If all candidates require unimplemented resolution, the result is `UNSUPPORTED_FORMAT`, rather than a misleading successful empty list. When supported direct formats coexist with unsupported candidates, only supported formats are returned. This release does not expose a separate per-format omission reason.
+A successful metadata response contains at least one supported direct format. If all candidates require unimplemented resolution, or no candidate survives destination/cipher validation, the result is `UNSUPPORTED_FORMAT`, rather than a misleading successful empty list. When supported direct formats coexist with unsupported candidates, only supported formats are returned. This release does not expose a separate per-format omission reason.
 
 ## Explicit failures
 
@@ -45,6 +45,8 @@ A successful metadata response contains at least one supported direct format. If
 | HTTP DNS/connection/TLS/proxy failure | `DNS` or `NETWORK`, with timeout separated where identifiable |
 | HTTP 429 or a recognized playback rate-limit reason | `UPSTREAM_RATE_LIMITED` |
 | HTTP 401/403 | `ACCESS_RESTRICTED`; an identifiable proxy denial stays `NETWORK` |
+| Recognized HTTPS consent, sign-in or verification redirect | `ACCESS_RESTRICTED`; the target is not fetched |
+| Redirect outside the permitted metadata/media endpoints | `NETWORK`; the target is rejected before connection |
 | Rejected HTTP response with an already expired `expire` query | `EXPIRED_URL` |
 | Sign-in, age/content checks, unavailable playback, consent or recognized verification page | `ACCESS_RESTRICTED` |
 | Missing/malformed player JSON, changed schema, mismatched video ID, unknown playability status | `PLAYER_CHANGED` |
@@ -91,5 +93,7 @@ A narrow static DASH subset could fit current types: a static MPD with a single,
 `tests/fixtures/player-direct.json`, `player-watch.html`, and `player-restricted.json` are synthetic. The tests cover escaped braces/quotes, progressive and adaptive metadata, replay semantics, mismatched identifiers, access denials, unsupported transforms, DRM and manifests. Network unit fixtures cover unsafe redirects, bounded chunked bodies and status classification.
 
 When the upstream changes, record the failure category first. Capture only public, authorized player/manifest data through approved egress, remove signed URLs, signatures, cookies, user identifiers and other credentials, and minimize it to the failing schema. Add a versioned fixture plus an explicit parser test before changing a recognized field or syntax boundary. Keep assertions about known failures when adding support. Do not copy an existing extraction engine's implementation or claim synthetic fixtures are live samples.
+
+`tests/fixtures/player-mixed-destinations.json` is also synthetic. It verifies that unsupported destinations cannot poison an otherwise usable response; it is not a capture of the reported Railway incident. Network fixtures cover bounded redirect chains, exact access-gate recognition, refusal before connection, and redaction of paths and signed queries in diagnostics.
 
 The ignored `tests/external_metadata.rs` probe requires `AUTHORIZED_TEST_YOUTUBE_URL` and approved egress. It checks metadata and supported format discovery only. Separate authorized audio/video downloads, output inspection, Docker runtime checks and Railway deployment checks are required for the full acceptance criteria. Record the source host, deployment environment, test date, observed outcome and limitation without storing signed URLs or tokens.

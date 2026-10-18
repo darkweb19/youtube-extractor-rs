@@ -70,6 +70,15 @@ Errors use JSON with a stable code and a safe message:
 
 A job can be accepted and fail later; inspect its `error` rather than treating `202` as successful extraction. Do not retry access restrictions in a loop. Queue pressure and transient network errors may be retried with bounded client backoff. No callback or webhook fields are currently accepted or delivered.
 
+Upstream redirect policy errors distinguish metadata from media. Consent,
+sign-in and verification redirects return `ACCESS_RESTRICTED` without following
+the access gate. Unknown or unsafe redirect destinations return `NETWORK` and
+remain blocked. An individual unusable media candidate is omitted when another
+validated direct stream is available; no surviving candidate returns
+`UNSUPPORTED_FORMAT`. The endpoint allowlists are unchanged. Browser terminal
+errors retain the backend reason and use code-specific recovery guidance,
+without automatically resubmitting a failed generation job.
+
 ## Public browser workflow
 
 The page at `/` is public when `FRONTEND_ENABLED=true` (the default). Its static

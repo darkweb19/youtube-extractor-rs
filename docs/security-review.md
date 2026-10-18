@@ -38,6 +38,15 @@ checks and the deployment conditions below.
 
 ## Security assumptions and limits
 
+The upstream-destination follow-up retained the existing HTTPS endpoint
+allowlists, DNS pinning and proxy trust boundary. Known access-gate redirects
+are classified as refusals, not added to the allowlist. Redirect validation
+precedes connection. Candidate-local URL/cipher failures no longer discard
+other validated formats, but rejected destinations never reach selection or
+downloading. Diagnostics expose only stage, phase, normalized hostname and error
+code; tests cover path/query/signature redaction. These checks do not establish
+the live Railway incident's exact rejection path or successful extraction.
+
 - The shared bearer token represents one trusted service tenant. It does not
   isolate independent customers or provide per-user ownership. All implemented
   v1 operations, including completed file retrieval, pass through authentication.

@@ -298,16 +298,24 @@ pub fn parse_player_response(json: &str, expected: &VideoId) -> Result<VideoInfo
     }
     let has_manifests = streams.hls_manifest_url.is_some() || streams.dash_manifest_url.is_some();
     let mut formats = Vec::new();
+    let mut rejected_candidate = false;
     for format in streams.formats.into_iter().chain(streams.adaptive_formats) {
         if !format.drm_families.is_empty() || format.drm_track_type.is_some() {
             continue;
         }
-        if let Some(parsed) = parse_format(format)? {
-            formats.push(parsed);
+        // A player response can advertise several independent delivery mechanisms.
+        // An unusable candidate must not discard another validated direct stream.
+        // Rejected destinations are never returned to selection or the downloader.
+        match parse_format(format) {
+            Ok(Some(parsed)) => formats.push(parsed),
+            Ok(None) => {}
+            Err(_) => rejected_candidate = true,
         }
     }
     if formats.is_empty() {
-        return Err(unsupported(if has_manifests {
+        return Err(unsupported(if rejected_candidate {
+            "No supported direct streams; exposed media URLs are invalid or outside the allowed YouTube media hosts"
+        } else if has_manifests {
             "Manifest-only streams are unsupported in this release"
         } else {
             "No supported direct streams; signature or throttling JavaScript resolution may be required"
@@ -518,6 +526,115 @@ mod tests {
                     .unwrap_err()
                     .code,
                 ErrorCode::UnsupportedFormat
+            );
+        }
+    }
+    #[test]
+    fn invalid_candidates_do_not_discard_valid_direct_streams_in_either_order() {
+        let id = VideoId::new(ID).unwrap();
+        let original: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/player-mixed-destinations.json"
+        ))
+        .unwrap();
+        for reverse in [false, true] {
+            let mut json = original.clone();
+            if reverse {
+                for field in ["formats", "adaptiveFormats"] {
+                    json["streamingData"][field]
+                        .as_array_mut()
+                        .unwrap()
+                        .reverse();
+                }
+                let streams = json["streamingData"].as_object_mut().unwrap();
+                let formats = streams.remove("formats").unwrap();
+                let adaptive = streams.remove("adaptiveFormats").unwrap();
+                streams.insert("formats".into(), adaptive);
+                streams.insert("adaptiveFormats".into(), formats);
+            }
+            let info = parse_player_response(&json.to_string(), &id).unwrap();
+            assert_eq!(info.formats.len(), 1);
+            assert_eq!(info.formats[0].itag, 18);
+            let accepted = info.formats[0].url.as_ref().unwrap();
+            assert_eq!(
+                validate_media_url(accepted).unwrap().host_str(),
+                Some("rr1---sn-fixture.googlevideo.com")
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_direct_and_cipher_destinations_never_reach_selection() {
+        let id = VideoId::new(ID).unwrap();
+        let original: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/player-direct.json")).unwrap();
+        for url in [
+            "not a URL?token=secret",
+            "http://r1.googlevideo.com/videoplayback?token=secret",
+            "https://user:secret@r1.googlevideo.com/videoplayback",
+            "https://127.0.0.1/private?token=secret",
+            "https://r1.googlevideo.com.evil.invalid/videoplayback?token=secret",
+            "https://r1.googlevideo.com:444/videoplayback?token=secret",
+            "https://r1.googlevideo.com/videoplayback#secret",
+        ] {
+            for cipher in [false, true] {
+                let mut candidate = serde_json::json!({"itag":900,"mimeType":"video/mp4"});
+                if cipher {
+                    candidate["signatureCipher"] =
+                        url::form_urlencoded::Serializer::new(String::new())
+                            .append_pair("url", url)
+                            .append_pair("sig", "synthetic")
+                            .finish()
+                            .into();
+                } else {
+                    candidate["url"] = url.into();
+                }
+                let mut json = original.clone();
+                json["streamingData"] = serde_json::json!({"formats":[candidate]});
+                let error = parse_player_response(&json.to_string(), &id).unwrap_err();
+                assert_eq!(error.code, ErrorCode::UnsupportedFormat);
+                assert!(error.message.contains("No supported direct streams"));
+                assert!(!error.message.contains("secret"));
+                assert!(!error.message.contains(url));
+            }
+        }
+    }
+
+    #[test]
+    fn cipher_urls_are_decoded_once_validated_and_can_coexist_with_bad_candidates() {
+        let id = VideoId::new(ID).unwrap();
+        let mut json: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/player-mixed-destinations.json"
+        ))
+        .unwrap();
+        let nested = "https://r1.googlevideo.com/videoplayback?itag=18&label=one%26two";
+        let cipher = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("url", nested)
+            .append_pair("sig", "already-signed")
+            .append_pair("sp", "sig")
+            .finish();
+        json["streamingData"]["formats"][1] = serde_json::json!({
+            "itag":18,"mimeType":"video/mp4","signatureCipher":cipher
+        });
+        let info = parse_player_response(&json.to_string(), &id).unwrap();
+        assert_eq!(info.formats.len(), 1);
+        let accepted = validate_media_url(info.formats[0].url.as_ref().unwrap()).unwrap();
+        let pairs: Vec<_> = accepted.query_pairs().collect();
+        assert!(pairs.iter().any(|(k, v)| k == "label" && v == "one&two"));
+        assert!(pairs
+            .iter()
+            .any(|(k, v)| k == "sig" && v == "already-signed"));
+        assert_eq!(pairs.len(), 3);
+
+        for malformed in ["sig=synthetic", "url=bad&url=also-bad"] {
+            json["streamingData"]["formats"][0] = serde_json::json!({
+                "itag":900,"mimeType":"video/mp4","cipher":malformed
+            });
+            assert_eq!(
+                parse_player_response(&json.to_string(), &id)
+                    .unwrap()
+                    .formats
+                    .len(),
+                1
             );
         }
     }

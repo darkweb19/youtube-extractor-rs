@@ -1,6 +1,34 @@
-# Native player protocol support
+# YouTube protocol support and legacy parser
 
-This release implements its own parser using general-purpose Rust HTTP, URL, and JSON crates. It does not contain an existing YouTube extractor, an extraction-library wrapper, a private playback API client, or a JavaScript interpreter. The implemented subset is intentionally explicit. A deterministic fixture test demonstrates the parser and downloader's behavior; it does not establish current YouTube or Railway compatibility.
+## Production path: yt-dlp + Deno
+
+The deployed Rust/Axum service uses a managed yt-dlp subprocess for YouTube
+metadata, stream extraction, downloading and FFmpeg merging. Deno runs yt-dlp's
+maintained EJS solver. The Rust service constructs a canonical HTTPS YouTube
+watch URL from a validated 11-character video ID and never forwards arbitrary
+submitted URLs or passes them to a shell.
+
+The metadata endpoint invokes yt-dlp once with JSON output; media downloads use
+a second managed invocation in a job-specific directory. Standard MP4 jobs
+choose compatible MP4 video and M4A audio and merge the streams with FFmpeg.
+The worker enforces an overall timeout, cooperative cancellation, workspace
+byte limits, local FFprobe media validation and authenticated publication. It
+does not include upstream signed URLs in the metadata response.
+
+The CLI currently permits the official `ejs:npm` remote component source.
+This is a maintained dependency, not arbitrary user-provided executable code.
+Keep yt-dlp and Deno patched and enforce OS-level process/memory limits.
+Availability can still differ by host IP: successful local extraction does not
+establish Railway compatibility. DRM, signed-in sessions and CAPTCHA bypasses
+are outside scope.
+
+## Legacy native parser (inactive in production)
+
+The remainder of this document describes the experimental native Rust parser,
+`src/extractor.rs` and `src/player.rs`, which remain available for test
+fixtures but are **not used by the default production server or job executor**.
+These historical limitations are not representative of yt-dlp's supported
+protocols.
 
 ## Inputs and source of player data
 

@@ -1,0 +1,36 @@
+name: Rusty extractor branch validation
+on:
+  push:
+    branches: [fix/rust-yt-bot]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: rusty-yt-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pinned Rust toolchain
+        run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - name: Regenerate Cargo.lock for rusty_ytdl
+        run: cargo generate-lockfile
+      - name: Commit updated Cargo.lock to experimental branch
+        run: |
+          if ! git diff --quiet -- Cargo.lock; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add Cargo.lock
+            git commit -m "build(lockfile): resolve pinned rusty_ytdl dependency tree"
+            git push origin HEAD:fix/rust-yt-bot
+          fi
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Test Rust
+        run: cargo test --locked --all-targets

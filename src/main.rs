@@ -4,9 +4,11 @@ use youtube_extractor::{
     api::{self, ApiState},
     config::Config,
     jobs::{JobManager, JobSettings},
+    download::DownloadPipeline,
     media::Ffmpeg,
+    network::SafeHttpClient,
+    rusty_extractor::RustyYtdlExtractor,
     storage::LocalStorage,
-    ytdlp::YtDlp,
 };
 
 #[tokio::main]
@@ -29,12 +31,15 @@ async fn run() -> youtube_extractor::error::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| "ffprobe".into());
     let ffmpeg = Ffmpeg::new(config.ffmpeg_path.clone(), probe, config.download_timeout);
-    let pipeline = Arc::new(YtDlp::new(
-        config.yt_dlp_path.clone(),
+    let extractor = Arc::new(RustyYtdlExtractor);
+    let http = SafeHttpClient::new(config.connect_timeout, config.request_timeout)?;
+    let pipeline = Arc::new(DownloadPipeline::new(
+        extractor.clone(),
+        http,
         storage,
         ffmpeg,
-        config.download_timeout,
         config.max_download_bytes,
+        2,
     ));
     let jobs = JobManager::new(
         JobSettings {
@@ -50,7 +55,7 @@ async fn run() -> youtube_extractor::error::Result<()> {
         pipeline.clone(),
     )
     .await?;
-    let app = api::router(ApiState::new(config.clone(), pipeline, jobs.clone()));
+    let app = api::router(ApiState::new(config.clone(), extractor, jobs.clone()));
     let listener = tokio::net::TcpListener::bind(config.bind_addr)
         .await
         .map_err(|_| {

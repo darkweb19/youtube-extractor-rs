@@ -2,8 +2,8 @@ use std::{future::IntoFuture, path::PathBuf, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 use youtube_extractor::{
     api::{self, ApiState},
-    config::Config,
     apify::ApifyClient,
+    config::Config,
     download::DownloadPipeline,
     extractor::ApifyExtractor,
     jobs::{JobManager, JobSettings},
@@ -27,7 +27,9 @@ async fn main() {
 async fn run() -> youtube_extractor::error::Result<()> {
     let config = Arc::new(Config::from_env()?);
     let apify = Arc::new(ApifyClient::from_env(
-        config.connect_timeout, config.request_timeout, config.download_timeout,
+        config.connect_timeout,
+        config.request_timeout,
+        config.download_timeout,
     )?);
     let extractor = Arc::new(ApifyExtractor::new(apify.clone()));
     let storage = LocalStorage::new(config.data_dir.clone()).await?;
@@ -35,7 +37,12 @@ async fn run() -> youtube_extractor::error::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| "ffprobe".into());
     let ffmpeg = Ffmpeg::new(config.ffmpeg_path.clone(), probe, config.download_timeout);
-    let pipeline = Arc::new(DownloadPipeline::new(apify, storage, ffmpeg, config.max_download_bytes));
+    let pipeline = Arc::new(DownloadPipeline::new(
+        apify,
+        storage,
+        ffmpeg,
+        config.max_download_bytes,
+    ));
     let jobs = JobManager::new(
         JobSettings {
             data_dir: config.data_dir.clone(),

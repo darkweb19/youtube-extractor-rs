@@ -135,9 +135,18 @@ impl Ffmpeg {
                 // MP4 files provided by the Actor need an actual WebM transcode;
                 // stream copy into a WebM container is not valid for H.264/AAC.
                 args.extend([
-                    "-c:v".into(), "libvpx-vp9".into(), "-deadline".into(), "realtime".into(),
-                    "-cpu-used".into(), "5".into(), "-b:v".into(), "0".into(), "-crf".into(), "34".into(),
-                    "-c:a".into(), "libopus".into(),
+                    "-c:v".into(),
+                    "libvpx-vp9".into(),
+                    "-deadline".into(),
+                    "realtime".into(),
+                    "-cpu-used".into(),
+                    "5".into(),
+                    "-b:v".into(),
+                    "0".into(),
+                    "-crf".into(),
+                    "34".into(),
+                    "-c:a".into(),
+                    "libopus".into(),
                 ]);
             } else {
                 args.extend(["-c".into(), "copy".into()]);

@@ -1,12 +1,12 @@
 //! Strict YouTube URL parsing; Apify supplies all upstream metadata.
-use std::sync::Arc;
-use async_trait::async_trait;
-use url::Url;
 use crate::{
     apify::ApifyClient,
     error::{AppError, Result},
     model::{VideoId, VideoInfo},
 };
+use async_trait::async_trait;
+use std::sync::Arc;
+use url::Url;
 #[async_trait]
 pub trait Extractor: Send + Sync {
     async fn video_info(&self, input: &str) -> Result<VideoInfo>;
@@ -16,7 +16,9 @@ pub struct ApifyExtractor {
     client: Arc<ApifyClient>,
 }
 impl ApifyExtractor {
-    pub fn new(client: Arc<ApifyClient>) -> Self { Self { client } }
+    pub fn new(client: Arc<ApifyClient>) -> Self {
+        Self { client }
+    }
 }
 #[async_trait]
 impl Extractor for ApifyExtractor {
@@ -94,7 +96,6 @@ pub fn normalize_url(input: &str) -> Result<VideoId> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,7 +105,7 @@ mod tests {
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
             "https://youtu.be/dQw4w9WgXcQ",
             "https://youtube.com/shorts/dQw4w9WgXcQ",
-            "https://youtube.com/live/dQw4w9WgXcQ"
+            "https://youtube.com/live/dQw4w9WgXcQ",
         ] {
             assert_eq!(normalize_url(url).unwrap().as_ref(), "dQw4w9WgXcQ");
         }
@@ -116,6 +117,8 @@ mod tests {
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ&v=aqz-KE-bpKQ",
             "http://127.0.0.1/watch?v=dQw4w9WgXcQ",
             "https://www.youtube.com/%77atch?v=dQw4w9WgXcQ",
-        ] { assert!(normalize_url(url).is_err()); }
+        ] {
+            assert!(normalize_url(url).is_err());
+        }
     }
 }

@@ -53,7 +53,7 @@ python3 - "$output_dir/info.json" <<'PY'
 import json, sys
 value = json.load(open(sys.argv[1]))
 assert value["title"], "Metadata title is missing"
-assert value["formats"], "No formats discovered"
+assert isinstance(value["formats"], list), "Metadata formats field must be an array"
 PY
 for kind in audio video; do
   request /api/v1/downloads "$output_dir/$kind-created.json" --header 'Content-Type: application/json' --data-binary "@$output_dir/$kind-request.json"

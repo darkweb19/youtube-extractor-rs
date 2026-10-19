@@ -24,8 +24,6 @@ pub struct Config {
     pub request_timeout: Duration,
     pub download_timeout: Duration,
     pub ffmpeg_path: PathBuf,
-    pub yt_dlp_path: PathBuf,
-    pub deno_path: PathBuf,
     pub requests_per_minute: u32,
     pub max_concurrent_requests: usize,
 }
@@ -88,8 +86,6 @@ impl Config {
             request_timeout: Duration::from_secs(number(&lookup, "REQUEST_TIMEOUT_SECS", 30)?),
             download_timeout: Duration::from_secs(number(&lookup, "DOWNLOAD_TIMEOUT_SECS", 1800)?),
             ffmpeg_path: PathBuf::from(lookup("FFMPEG_PATH").unwrap_or_else(|| "ffmpeg".into())),
-            yt_dlp_path: PathBuf::from(lookup("YTDLP_PATH").unwrap_or_else(|| "yt-dlp".into())),
-            deno_path: PathBuf::from(lookup("DENO_PATH").unwrap_or_else(|| "deno".into())),
             requests_per_minute: number(&lookup, "REQUESTS_PER_MINUTE", 120)?,
             max_concurrent_requests: number(&lookup, "MAX_CONCURRENT_REQUESTS", 32)?,
         };
@@ -152,11 +148,9 @@ impl Config {
         }
         if self.data_dir.as_os_str().is_empty()
             || self.ffmpeg_path.as_os_str().is_empty()
-            || self.yt_dlp_path.as_os_str().is_empty()
-            || self.deno_path.as_os_str().is_empty()
         {
             return Err(AppError::invalid(
-                "DATA_DIR, FFMPEG_PATH, YTDLP_PATH and DENO_PATH cannot be empty",
+                "DATA_DIR and FFMPEG_PATH cannot be empty",
             ));
         }
         Ok(())

@@ -3,6 +3,7 @@
 set -euo pipefail
 image="${IMAGE:-youtube-extractor:local}"
 work_dir="$(mktemp -d)"
+export APIFY_API_TOKEN="smoke-test-placeholder-token-not-valid"
 container_id=""
 missing_token_id=""
 cleanup() {
@@ -12,7 +13,7 @@ cleanup() {
 }
 trap cleanup EXIT
 export API_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-container_id="$(docker run --detach --publish 127.0.0.1::8080 --env API_TOKEN "$image")"
+container_id="$(docker run --detach --publish 127.0.0.1::8080 --env API_TOKEN --env APIFY_API_TOKEN "$image")"
 port="$(docker port "$container_id" 8080/tcp | sed -n 's/127.0.0.1://p')"
 base_url="http://127.0.0.1:$port"
 ready=false
@@ -45,4 +46,4 @@ for _ in $(seq 1 15); do
 done
 [[ "$(docker inspect --format '{{.State.Running}}' "$missing_token_id")" == 'false' ]]
 [[ "$(docker inspect --format '{{.State.ExitCode}}' "$missing_token_id")" != '0' ]]
-echo 'PASS: container health, non-root runtime, FFmpeg, auth, SSRF rejection, and missing-token startup refusal'
+echo 'PASS: container health, non-root runtime, FFmpeg, auth, URL rejection, and missing-token startup refusal'

@@ -1,5 +1,6 @@
 //! Native extraction protocol, bounded media execution, and authenticated API.
 pub mod api;
+pub mod apify;
 pub mod config;
 pub mod download;
 pub mod error;

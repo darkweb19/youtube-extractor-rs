@@ -1,12 +1,12 @@
 # Verification results
 
-> **Update (2026-10-17):** This document's checks below describe an older
-> native-extractor revision. The production request path has since switched to
-> managed yt-dlp/Deno. The new integration, container build and external smoke
-> checks have **not been executed in this session**; no green CI status is
-> claimed for the current feature branch. The user independently demonstrated
-> a successful yt-dlp+FFmpeg MP4 download on macOS, but that is not a test of
-> the newly integrated Rust worker or Railway's outbound network.
+> **Experimental branch update (2026-10-19):** `fix/rust-yt-bot` uses
+> `rusty_ytdl` with the Rust media pipeline. The test results below are
+> historical and do not represent deployment acceptance for this experimental
+> branch. GitHub Actions `Rusty extractor branch validation` is the
+> authoritative build/lint/test status for the newest commit. No live
+> YouTube or Railway download with `rusty_ytdl` has been verified here.
+> The earlier successful Mac MP4 test was performed with Python yt-dlp.
 >
 Verified on 2026-10-16 in the managed Linux x86_64 development environment, with
 Rust 1.99.1 and the committed dependency lockfile. These results describe this

@@ -35,7 +35,7 @@ docker run --rm --name youtube-extractor \
   youtube-extractor:local
 ```
 
-The pinned Rust builder compiles with the lockfile. The Debian runtime installs FFmpeg, `curl`, a pinned yt-dlp Python package with official EJS scripts, and Deno 2.7.4, then runs as UID/GID `10001:10001`. `YTDLP_PATH` points to the venv executable and the Deno cache is stored under `/data/deno-cache`. No source, Rust compiler or session credentials are copied into the runtime. Base version tags are explicit; release operators should additionally lock reviewed base image digests and refresh them for security updates.
+The pinned Rust builder compiles `rusty_ytdl` with the committed Cargo.lock. The Debian runtime installs FFmpeg, `ffprobe` and `curl` only, then runs as UID/GID `10001:10001`. No source, Rust compiler or session credentials are copied into the runtime. Base version tags are explicit; release operators should additionally lock reviewed base image digests and refresh them for security updates.
 
 In managed Codex environments, supply session CA trust through optional BuildKit secret mounts; never copy it into the image or disable TLS verification:
 
@@ -61,8 +61,6 @@ Configured `HTTPS_PROXY`/`ALL_PROXY` (and their lowercase equivalents) are trust
 | `ALLOW_UNAUTHENTICATED` | `false` | Explicit local development only, with no token configured |
 | `PORT` | `8080` | Listen port on all IPv4 interfaces |
 | `DATA_DIR` | `data` (`/data` in image) | Job records, temporary media and completed outputs |
-| `YTDLP_PATH` | `yt-dlp` | Managed extractor executable (image: `/opt/ytdlp/bin/yt-dlp`) |
-| `DENO_PATH` | `deno` | JS runtime availability check (image: `/usr/local/bin/deno`) |
 | `WORKERS` | `2` | Concurrent background media jobs, range 1–64 |
 | `QUEUE_CAPACITY` | `16` | Bounded waiting queue, range 1–4096 |
 | `MAX_JOBS` | `256` | Retained/admitted job record limit; at least workers + queue |
@@ -93,4 +91,4 @@ For rollback, retain the last verified image/commit and the associated configura
 
 ## Railway-specific extraction limitations
 
-A healthy container and successful local yt-dlp test do not prove a Railway outbound IP is accepted by YouTube. Avoid repeated immediate retry loops if Railway gets an upstream sign-in/verification response. The subprocess is given only a canonical, validated YouTube video URL, and neither Google cookies nor CAPTCHA bypass is configured. yt-dlp requires outbound HTTPS to YouTube/googlevideo hosts and optionally npm for EJS components. Keep platform network limits in place; yt-dlp manages redirects internally, so the legacy native HTTP destination allowlist is **not** an enforcement boundary for these subprocess requests.
+A healthy container and a successful local `rusty_ytdl` metadata test do not prove a Railway outbound IP is accepted by YouTube. Avoid repeated immediate retry loops if Railway gets an upstream sign-in/verification response. The Rust adapter reconstructs a canonical YouTube watch URL from a validated ID. No Google cookies or CAPTCHA handling are configured. `rusty_ytdl` performs metadata requests internally, so its metadata egress is not covered by `SafeHttpClient`; downloaded media URLs are validated by the Rust transfer client. Apply OS-level network controls and do not interpret an HTTP 429 as a parser regression.

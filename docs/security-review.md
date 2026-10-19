@@ -1,17 +1,12 @@
 # Adversarial review
 
-> **New adapter review needed (2026-10-17).** The service now executes an
-> administrator-installed yt-dlp/Python CLI and Deno child processes for public
-> YouTube extraction. The findings below were recorded for the earlier native
-> prototype and are not a security certification of this new implementation.
-> The API canonicalizes video IDs before invoking yt-dlp with explicit argv
-> (not shell interpolation), stores output under UUID job directories, suppresses
-> raw subprocess logs, enforces a job timeout, cancels children, checks workspace
-> bytes and verifies output with FFprobe. yt-dlp controls its own outbound HTTPS
-> requests and redirects, so the legacy Rust `SafeHttpClient` allowlist and
-> pinned DNS checks **do not apply** to the subprocess. Production release needs
-> a separate process-isolation and network-egress review, plus explicit tests
-> that children and FFmpeg subprocesses stop on cancellation.
+> **Experimental native adapter (2026-10-19).** The active `rusty_ytdl`
+> adapter removes the Python yt-dlp/Deno subprocess dependency. The existing
+> Rust `SafeHttpClient` validates and pins media-transfer destinations, but the
+> crate's internal metadata fetches use their own HTTP client and need separate
+> egress/security assessment. Parsed signed media URLs are not exposed to
+> API clients or normal logs. A working Rust build does not establish live
+> YouTube/Railway access or establish an overall security certification.
 >
 **Scope:** The initial native extraction service: URL/player parsing, outbound
 HTTP, stream transfer, FFmpeg, local storage, job lifecycle, API authentication,

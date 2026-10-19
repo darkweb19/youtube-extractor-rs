@@ -1,26 +1,26 @@
 # YouTube protocol support and legacy parser
 
-## Production path: yt-dlp + Deno
+## Experimental active path: rusty_ytdl
 
-The deployed Rust/Axum service uses a managed yt-dlp subprocess for YouTube
-metadata, stream extraction, downloading and FFmpeg merging. Deno runs yt-dlp's
-maintained EJS solver. The Rust service constructs a canonical HTTPS YouTube
-watch URL from a validated 11-character video ID and never forwards arbitrary
-submitted URLs or passes them to a shell.
+This branch uses `rusty_ytdl = 0.7.4` for native Rust metadata extraction and
+format discovery. The Rust service reconstructs a canonical watch URL from a
+strictly validated 11-character video ID. The crate's parsed formats are
+normalized to the existing model; live/HLS/DASH-only/unsupported formats and
+unsafe media destinations are omitted. Signed media URLs are retained privately
+for download execution and excluded from public JSON.
 
-The metadata endpoint invokes yt-dlp once with JSON output; media downloads use
-a second managed invocation in a job-specific directory. Standard MP4 jobs
-choose compatible MP4 video and M4A audio and merge the streams with FFmpeg.
-The worker enforces an overall timeout, cooperative cancellation, workspace
-byte limits, local FFprobe media validation and authenticated publication. It
-does not include upstream signed URLs in the metadata response.
+The existing Rust `DownloadPipeline` selects compatible separate video/audio
+formats and streams direct HTTPS media into a UUID job workspace, within the
+worker quota and cancellation deadlines. FFmpeg processes completed local
+inputs and the output is published through the existing authenticated storage.
+This is **not** a new YouTube anti-bot workaround: Railway previously returned
+HTTP 429 and a sign-in verification challenge, which the library cannot be
+assumed to solve. DRM, sign-in cookies, automated verification and protected
+streams remain unsupported.
 
-The CLI currently permits the official `ejs:npm` remote component source.
-This is a maintained dependency, not arbitrary user-provided executable code.
-Keep yt-dlp and Deno patched and enforce OS-level process/memory limits.
-Availability can still differ by host IP: successful local extraction does not
-establish Railway compatibility. DRM, signed-in sessions and CAPTCHA bypasses
-are outside scope.
+Because `rusty_ytdl` is older than the current yt-dlp ecosystem, live
+compatibility must be tested independently for authorized media, including
+the exact Railway outbound network.
 
 ## Legacy native parser (inactive in production)
 

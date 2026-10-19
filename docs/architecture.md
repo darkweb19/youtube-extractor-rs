@@ -1,12 +1,12 @@
 # Architecture and operational assumptions
 
-This is one independently deployable Rust/Axum service. In the production path,
-a managed `yt-dlp` subprocess handles YouTube extraction, stream transfer and
-FFmpeg-based merge/extraction. Deno provides the maintained EJS runtime; Rust
-handles bearer authentication, URL normalization, job admission and queue,
-cancellation, workspace byte budgets, FFprobe output checks, storage and file
-delivery. The former native parser/downloader is retained as testable legacy
-code but is not the production job executor.
+This branch runs one Rust/Axum service. `rusty_ytdl` discovers public YouTube
+metadata and direct stream URLs; the original Rust `DownloadPipeline` handles
+bounded HTTP transfers, retries, cancellation and FFmpeg on local files.
+Rust also owns bearer authentication, URL normalization, job admission/queue,
+storage, and authenticated completed-file delivery. The earlier bespoke
+parser is retained for regression tests, but Python yt-dlp and Deno are not in
+the active execution path.
 
 ## Workload and reliability assumptions
 
@@ -56,31 +56,32 @@ before horizontally scaling one shared job namespace.
 | `error` | Stable machine error codes and JSON error responses |
 | `model` | Public metadata, requests, formats, and job response types |
 | `extractor` | URL normalization; legacy native parser retained for fixtures |
-| `network` | Legacy native transport; yt-dlp now owns its upstream HTTPS requests |
-| `download` | Legacy native streaming and shared progress types |
-| `media` | Local-file FFprobe validation; yt-dlp invokes FFmpeg for remuxing |
-| `ytdlp` | Managed extractor subprocess, safe argument construction, bounded workspace monitoring, output verification |
+| `network` | Validates media hosts/IPs, redirects, DNS and bounded outbound transfers |
+| `download` | Production format selection, streamed transfers, retries and progress |
+| `media` | Bounded local FFmpeg conversion/merge and FFprobe validation |
+| `rusty_extractor` | Native crate adapter and mapping to sanitized public metadata/stream formats |
 | `storage` | Managed local paths, completed output, cleanup and durable local records |
 | `jobs` | Admission, bounded execution, state transitions, cancellation and retention |
 
-The common extractor trait keeps metadata independent from the Axum API.
-The production implementation delegates extraction and transfer to yt-dlp.
-Every supplied URL is normalized into a single YouTube video ID and reconstructed
-before crossing the subprocess boundary. No shell interpolation or user-derived
-output paths are used. Metadata format URLs are deliberately omitted from API
-serialization. yt-dlp and Deno remain external processes that must be sandboxed
-with container CPU, memory and PID limits.
+The common `Extractor` trait keeps metadata independent from the Axum API.
+`rusty_extractor` normalizes URLs to a validated 11-character video ID, invokes
+`rusty_ytdl` for public metadata, rejects unsupported manifests and unsafe media
+URLs, and redacts signed stream URLs from API serialization. The production
+Rust downloader uses the existing `SafeHttpClient` destination validation.
+The crate's metadata-fetching requests are internal to `rusty_ytdl`; their egress
+controls require independent review. No attempt is made to bypass sign-in or
+automated-access challenges.
 
 ```mermaid
 flowchart LR
-  User -->|Bearer token| API[Axum API]
-  API -->|metadata| YTDLP[yt-dlp and Deno]
-  API -->|submit/status/cancel| Jobs[Bounded Rust jobs]
-  Jobs --> YTDLP
-  YTDLP -->|local FFmpeg merge| Files[Job workspace]
-  Files --> Probe[FFprobe validation]
-  Probe --> Storage[Managed local volume]
-  API -->|authenticated file download| Storage
+  Client -->|Bearer token| API[Axum API]
+  API -->|metadata| Extractor[rusty_ytdl adapter]
+  API -->|submit/status/cancel| Jobs[Rust job manager]
+  Jobs --> Extractor
+  Jobs --> Transfer[Bounded Rust streaming downloader]
+  Transfer -->|local files| FFMPEG[FFmpeg processing]
+  FFMPEG --> Storage[Local storage]
+  API -->|authorized download| Storage
 ```
 
 ## Job and resource lifecycle

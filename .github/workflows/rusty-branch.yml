@@ -16,6 +16,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Pinned Rust toolchain
         run: rustup show active-toolchain
+      - name: Install FFmpeg for media pipeline integration tests
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - uses: Swatinem/rust-cache@v2
       - name: Regenerate Cargo.lock for rusty_ytdl
         run: cargo generate-lockfile

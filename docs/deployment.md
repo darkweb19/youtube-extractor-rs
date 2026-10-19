@@ -1,167 +1,45 @@
-# Deployment and operations
+# Deployment and operations — Apify backend
 
-Deploy this repository as its own Railway service. It does not need, or share code with, another application backend. `railway.toml` selects the Dockerfile, `/health`, bounded restart attempts and one replica. Deployment requires an explicitly chosen Railway project, environment and service with suitable credentials; repository configuration alone does not create or deploy those resources.
+The Rust/Axum service retains the existing HTTP API and public browser UI. Apify now fetches metadata and downloads media; FFmpeg performs local validation and requested output conversion. The service uses its original bounded in-process jobs and persistent disk. It does not execute yt-dlp or fetch YouTube media directly.
 
 ## Railway setup
 
-1. Connect this repository to a new service in the intended Railway project/environment. Select its Dockerfile builder and the intended reviewed commit.
-   Keep the Dockerfile path set to `Dockerfile`, as specified by `railway.toml`.
-   It uses standard build steps without cache or secret mounts. Railway's parser
-   accepts only a restricted subset of mount syntax, so do not select the local
-   `Dockerfile.cloud` there. If an earlier deployment failed with a missing cache
-   ID or unsupported secret mount, redeploy the commit containing this portable
-   Dockerfile.
-2. Add a persistent volume mounted at `/data` and set `DATA_DIR=/data`. Arrange volume ownership so UID/GID `10001:10001` can create and delete files. The image prepares this path for ordinary Docker named volumes; an externally mounted Railway volume can have different ownership. Use the platform's supported volume initialization procedure, then keep the application non-root.
-3. Set a randomly generated `API_TOKEN` of at least 32 visible ASCII characters in Railway variables. Keep `ALLOW_UNAUTHENTICATED=false`. Set `UI_SECURE_COOKIES=true` for the HTTPS frontend. If the proxy rewrites Host, set `UI_PUBLIC_ORIGIN` to the exact external origin without a trailing slash. Do not paste credentials into source or deployment logs.
-4. Keep one replica for local storage and job ownership. Railway injects `PORT`; the service binds `0.0.0.0:$PORT`. Set resource limits and variables below before enabling public traffic. Expose an HTTPS Railway domain or private service network as appropriate.
-5. Deploy and verify `/health`, authentication and resource usage. Then run the explicitly opted external smoke check from the same Railway deployment and inspect the structured result.
+1. Connect `darkweb19/youtube-extractor-rs` to a Railway Docker service. Use the root `Dockerfile`, which does not need BuildKit secret mounts.
+2. Mount a persistent volume at `/data` writable by UID/GID 10001, set `DATA_DIR=/data`, and run one replica.
+3. Set `API_TOKEN` to a random 32+ character value and set `ALLOW_UNAUTHENTICATED=false`.
+4. Set `APIFY_API_TOKEN` from your Apify console in Railway service variables. Never put the token in source control or frontend JavaScript.
+5. Default Actors: `APIFY_METADATA_ACTOR=streamers~youtube-scraper` and `APIFY_DOWNLOAD_ACTOR=marielise.dev~youtube-video-downloader`. Override only when the replacement implements the same JSON input/output schema.
+6. If the downloader's file is in external R2 rather than the Apify key-value store, add the precise hostname from that trusted Actor to `APIFY_MEDIA_HOSTS` (comma-separated). The service rejects unexpected media hosts and redirect targets. Do not set a wildcard. Credentials are only transmitted to `api.apify.com`.
+7. Set `UI_SECURE_COOKIES=true` on HTTPS, optionally `UI_PUBLIC_ORIGIN=https://your-domain` if a reverse proxy changes the origin.
+8. Verify `/health` and API authentication. Then run `bash scripts/smoke-railway.sh` from a machine that has `ffprobe`, `curl`, and Python, with `BASE_URL`, `API_TOKEN`, `YOUTUBE_TEST_URL` and `ALLOW_EXTERNAL_YOUTUBE=1` set. This starts paid Actor runs. Use only videos you are authorized to download.
 
-The public health route probes local readiness, not YouTube reachability. A healthy deployment may still be denied by YouTube's data-center IP policy. Do not route external verification through a different network and report it as Railway success.
+## Operational behavior
 
-## Upstream extraction diagnostics
-
-The browser shows the job's safe backend error followed by guidance for its
-error code. A valid YouTube input can fail later while fetching metadata,
-following a redirect, or resolving media; changing the pasted link does not
-establish which phase failed.
-
-1. Locate **Rejected upstream destination** in the service logs. It records
-   `stage` (`metadata`/`media`), `phase` (`initial`/`redirect`),
-   `destination_host` and `error_code`. It intentionally omits paths, queries,
-   signed URLs, credentials and upstream bodies. Share only these safe fields
-   and the terminal job error when reporting a failure.
-2. `ACCESS_RESTRICTED` on a consent, sign-in or verification redirect means
-   YouTube required an interactive step. The service refuses the target before
-   connection. Keep that failure explicit; do not add those hosts to the media
-   allowlist or try to automate the access check.
-3. `NETWORK` on an unrecognized metadata/media redirect means the target remains
-   outside the endpoint policy. Inspect the recorded hostname before considering
-   a separately reviewed compatibility change. Do not allow arbitrary hosts or
-   disable HTTPS/DNS validation to suppress the error.
-4. A media `initial` warning can describe one rejected candidate in a larger
-   response. It is not by itself a failed job: other validated direct streams
-   remain eligible. Use the job's terminal status to distinguish a completed
-   result from `UNSUPPORTED_FORMAT` when no usable candidate remains.
-5. Once metadata succeeds, use the existing opted-in
-   `scripts/smoke-railway.sh` flow for an authorized video to verify actual MP3
-   and MP4 bytes from that deployment. Retain typed failures when blocked;
-   local fixtures and `/health` do not establish live extraction.
-
-The previously shared message **Upstream destination is not an allowed HTTPS
-YouTube endpoint** covered several distinct rejection paths. New releases
-separate these failures and isolate unusable media candidates. The exact cause
-of an older deployment's error requires its logs; the wording alone does not
-prove that the link was invalid or that YouTube allowed access from that host.
-
-## Public frontend configuration
-
-If the frontend reports **Request origin does not match this service**, set
-`UI_PUBLIC_ORIGIN` to the exact browser origin (for example,
-`https://your-service.up.railway.app`) and `UI_SECURE_COOKIES=true`, then redeploy.
-Do not include a trailing slash, path, or quotes in the variable value. An
-explicit origin must match the domain visitors use; replace stale values when
-switching to a custom domain. With `UI_PUBLIC_ORIGIN` unset, Railway's
-server-provided `RAILWAY_PUBLIC_DOMAIN` supplies the HTTPS origin automatically.
-Secure cookies default to true for a resolved HTTPS origin, unless explicitly
-overridden. Visitor-supplied forwarded headers are not used for this decision.
-
-The public generator is served at the same origin as the API; there is no separate
-frontend service or build command. `FRONTEND_ENABLED=true` enables anonymous
-generation through session-owned browser routes. Set it false for a private
-API-only deployment. Public visitors share the existing request and job/storage
-budgets with API clients. The API token remains server-side and still protects
-`/api/v1`.
-
-```bash
-# Export actual BASE_URL, API_TOKEN, YOUTUBE_TEST_URL securely first.
-export ALLOW_EXTERNAL_YOUTUBE=1
-bash scripts/smoke-railway.sh
-```
-
-This script requires local `curl`, Python 3 and `ffprobe`; it exercises the deployed HTTP origin and validates bytes returned from that deployment. It performs no deployment and needs no Railway CLI token. If upstream access is denied, retain the error evidence and mark compatibility blocked. Do not add CAPTCHA bypassing, credential cookies or proxy rotation.
-
-## Container use
-
-```bash
-docker build -t youtube-extractor:local .
-docker volume create youtube-extractor-data
-# API_TOKEN must be exported securely before this command.
-docker run --rm --name youtube-extractor \
-  --publish 127.0.0.1:8080:8080 \
-  --env API_TOKEN --env DATA_DIR=/data \
-  --mount type=volume,src=youtube-extractor-data,dst=/data \
-  --memory 2g --cpus 2 --pids-limit 128 --cap-drop ALL \
-  --security-opt no-new-privileges:true \
-  youtube-extractor:local
-```
-
-The pinned Rust builder compiles with the lockfile. The Debian runtime installs FFmpeg, `curl` for its health check and CA roots, then runs as UID/GID `10001:10001`. No source, Rust compiler or session credentials are copied into the runtime. Base version tags are explicit; release operators should additionally lock reviewed base image digests and refresh them for security updates.
-
-The default `Dockerfile` deliberately avoids build mounts for Railway compatibility.
-In managed Codex environments, explicitly select `Dockerfile.cloud` to supply
-session CA trust through BuildKit secret mounts; never copy it into the image or
-disable TLS verification. This local variant also uses named compilation caches:
-
-```bash
-mkdir -p /workspace/.tools/buildx
-BUILDX_CONFIG=/workspace/.tools/buildx docker build --file Dockerfile.cloud \
-  --secret id=proxy_ca,src="$CODEX_PROXY_CERT" \
-  --secret id=system_ca,src=/etc/ssl/certs/ca-certificates.crt \
-  -t youtube-extractor:local .
-```
-
-Keep the environment's supplied Docker proxy defaults and registry credentials. Runtime HTTPS through that proxy also needs a read-only combined CA bundle mount and `SSL_CERT_FILE` pointing to it. This is environment-specific trust configuration, separate from ordinary Railway deployment.
-
-Configured `HTTPS_PROXY`/`ALL_PROXY` (and their lowercase equivalents) are trusted infrastructure: the proxy owns remote DNS and destination connection enforcement. Direct connections resolve only public IP addresses and pin them for the request. Local address pinning cannot enforce the proxy's remote DNS resolution; configure any outbound proxy to deny private/reserved destinations and enforce the same destination policy. Application URL and redirect allowlists remain enforced in either mode. Do not accept proxy settings from API clients.
+- The metadata endpoint invokes the metadata Actor and can block up to `DOWNLOAD_TIMEOUT_SECS` (default 1800). Download creation returns 202 immediately; progress can be polled through the existing job route.
+- Download jobs use Apify's asynchronous Actor run API, poll for a terminal result and fetch one dataset item. Cancellation attempts to abort an active Actor, although already incurred provider charges may remain.
+- A successful actor must supply a matching `videoId`, `status: success`, `downloadUrl`, and optional `fileSizeBytes`; invalid or missing output fails closed.
+- Media is downloaded with streaming byte caps, cancellation and an exact HTTPS media host allowlist. There is no automatic resume for interrupted Apify object downloads; failed jobs clean partial local files.
+- The actor supports MP4 at 360/480/720/1080p and MP3. FFmpeg converts to requested M4A or WebM. `original` means the actor's native output, not an arbitrary YouTube source codec.
+- Apify may store large video files on Cloudflare R2; its signed links expire. The service must copy them locally before completion. Do not expose the signed link or bearer token to clients.
+- `/health` checks local disk and FFmpeg, not remote actor availability or token validity. Live acceptance requires the external smoke test.
+- Actor providers can change pricing, input schema, outputs and reliability. Monitor spending and impose Apify actor run charge caps where appropriate.
 
 ## Configuration
 
-`.env.example` is the authoritative editable example. The service reads process environment variables; it does not load dotenv files automatically.
+| Variable | Default | Meaning |
+|---|---|---|
+| `APIFY_API_TOKEN` | required | Private server-side Apify credential |
+| `APIFY_DOWNLOAD_ACTOR` | `marielise.dev~youtube-video-downloader` | Downloader Actor identity |
+| `APIFY_METADATA_ACTOR` | `streamers~youtube-scraper` | Metadata Actor identity |
+| `APIFY_MEDIA_HOSTS` | empty | Additional exact trusted HTTPS media hostnames |
+| `API_TOKEN` | required | Client API bearer token (separate from Apify) |
+| `DATA_DIR` | `data` | Persistent file and job storage |
+| `WORKERS` | 2 | Concurrent jobs |
+| `MAX_DOWNLOAD_BYTES` | 1 GiB | Combined input/output job workspace budget |
+| `MAX_STORAGE_BYTES` | 8 GiB | Logical retained storage limit |
+| `DOWNLOAD_TIMEOUT_SECS` | 1800 | Actor and processing timeout |
+| `REQUEST_TIMEOUT_SECS` | 30 | Normal HTTP request deadline |
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `API_TOKEN` | required | Shared bearer token, at least 32 characters, no whitespace |
-| `ALLOW_UNAUTHENTICATED` | `false` | Explicit local development only, with no token configured |
-| `FRONTEND_ENABLED` | `true` | Enable the public browser generator; false removes its page/assets and `/ui` routes |
-| `UI_SECURE_COOKIES` | true for a resolved HTTPS origin; otherwise false | Set true for HTTPS; an explicit setting overrides inference |
-| `UI_PUBLIC_ORIGIN` | `https://$RAILWAY_PUBLIC_DOMAIN` when available; otherwise unset | Explicit exact origin takes precedence; use the browser's domain without a trailing slash |
-| `PORT` | `8080` | Listen port on all IPv4 interfaces |
-| `DATA_DIR` | `data` (`/data` in image) | Job records, temporary media and completed outputs |
-| `WORKERS` | `2` | Concurrent background media jobs, range 1–64 |
-| `QUEUE_CAPACITY` | `16` | Bounded waiting queue, range 1–4096 |
-| `MAX_JOBS` | `256` | Retained/admitted job record limit; at least workers + queue |
-| `MAX_DOWNLOAD_BYTES` | `1073741824` | Per-job combined workspace budget for downloaded inputs plus output |
-| `MAX_STORAGE_BYTES` | `8589934592` | Logical aggregate reservations/output budget; at least MAX_DOWNLOAD_BYTES |
-| `JOB_TTL_SECS` | `3600` | Job/output retention, at most seven days |
-| `CONNECT_TIMEOUT_SECS` | `10` | Outbound connection timeout |
-| `REQUEST_TIMEOUT_SECS` | `30` | Metadata/upstream request timeout |
-| `DOWNLOAD_TIMEOUT_SECS` | `1800` | Job media processing/download timeout |
-| `FFMPEG_PATH` | `ffmpeg` | FFmpeg executable path |
-| `REQUESTS_PER_MINUTE` | `120` | In-process API rate limit |
-| `MAX_CONCURRENT_REQUESTS` | `32` | Concurrent API request bound |
-| `RUST_LOG` | `info` | Tracing filter; logs are structured JSON |
+## Verification and rollback
 
-## Storage, resources and recovery
-
-The initial storage implementation is local. A persistent `/data` volume is required to preserve records and completed output across container replacement. An ephemeral directory is suitable only for disposable development. This release does not provide an S3-compatible backend, distributed queue or distributed rate limiter. More than one replica can conflict over local job ownership and does not provide horizontal scaling; add those facilities before increasing replicas.
-
-Start with two CPU cores and 2 GiB memory for two workers, then measure actual codecs and bitrates. These are planning estimates, not benchmarked guarantees. MP3 transcoding consumes CPU; remuxing is cheaper. Keep `WORKERS` and `MAX_DOWNLOAD_BYTES` low enough for the workload. `MAX_DOWNLOAD_BYTES` covers combined downloaded inputs and the processed output, so a remux generally needs roughly twice the source size. Admission reserves that budget for each nonterminal job, including cancellation still in progress, and counts retained completed output toward `MAX_STORAGE_BYTES`. This logical storage ceiling may bind before the queue's nominal capacity. It does not reserve blocks from the filesystem or account for unrelated files; monitor actual free space and leave disk headroom.
-
-Enforce hard memory, CPU and process limits through Railway/container settings. FFmpeg's `-max_alloc` limits each allocation, not total process RAM, and a bounded Rust streaming buffer does not bound every codec allocation. Disk budget accounting excludes filesystem overhead and unrelated files, and FFmpeg's byte ceiling can overshoot slightly by an encoded packet. Keep free-space headroom and treat application limits as admission controls rather than operating-system quotas.
-
-Graceful termination stops accepting work, cancels in-flight work and cleans partial files. On restart, queued/running persisted records become failed with `DOWNLOAD_INTERRUPTED`; they are not automatically retried or resumed. Completed records and files survive when the same volume is retained. Expiration removes records and associated files after `JOB_TTL_SECS`. Persisted jobs do not imply resumable byte-range downloads. Test restart scenarios before relying on recovery for production operations. Retention is not backup: volume deletion or corruption can lose records and outputs. Back up important data using platform-supported mechanisms.
-
-Anonymous browser sessions and their job ownership are held in memory. They
-expire after one hour of inactivity and are cleared on restart, even if files
-survive on the volume. The browser can restore its current job after a page
-refresh only while the same session is valid. Download completed files promptly;
-retained files remain accessible through the authenticated API after a restart.
-
-Node.js and Playwright are development/CI dependencies for browser checks only.
-Production serves embedded HTML/CSS/JavaScript from the Rust binary. Container
-builds exclude `node_modules`, and the runtime does not install a Node.js or
-Python application server.
-
-Use JSON tracing, HTTP errors, job states, queue depth, completion latency, FFmpeg exit failures and disk utilization for operations. Do not log bearer tokens, signed source URLs or upstream page bodies. Keep application and platform logs together when distinguishing DNS, network policy, HTTP rate limiting, player changes and access restrictions.
-
-For rollback, retain the last verified image/commit and the associated configuration. Roll back through Railway's deployment history and repeat health/auth and chosen compatibility checks. Preserve the data volume and assess state-schema compatibility before rollback. Do not claim deployed service availability or extraction success until those checks have run against the selected service.
+CI uses synthetic files and does not incur actor charges. The optional external smoke verifies the deployed API contract, playable bytes and MP3/MP4 behavior. If Apify rejects a run, inspect the Actor run in your private Apify console; public job errors intentionally suppress sensitive response contents. Roll back to a previously reviewed commit or restore the relevant deployment image only after considering the differing extractor configuration and ensuring the persistent volume is retained.

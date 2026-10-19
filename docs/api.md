@@ -1,6 +1,6 @@
 # HTTP API v1
 
-All versioned endpoints use `Authorization: Bearer <API_TOKEN>`. The token is a shared service credential; this release does not provide per-user ownership or multi-tenant authorization. Keep it server-side and terminate public connections with TLS. Signed media source URLs and internal paths are not part of the client API.
+All versioned endpoints use `Authorization: Bearer <API_TOKEN>`. The token is a shared service credential; this release does not provide per-user ownership or multi-tenant authorization. Keep it server-side and terminate public connections with TLS. Signed media source URLs, Apify credentials and internal paths are not part of the client API.
 
 `GET /health` is public and reports readiness. A successful response establishes that the local service prerequisites work; it does not contact YouTube or establish outbound compatibility. An unavailable local storage directory or FFmpeg returns `503`.
 
@@ -12,7 +12,7 @@ All versioned endpoints use `Authorization: Bearer <API_TOKEN>`. The token is a 
 {"url":"https://www.youtube.com/watch?v=VIDEO_ID"}
 ```
 
-The successful response contains `id`, `title`, `description`, `duration_seconds`, `channel_id`, `channel_name`, `thumbnails` and `formats`. Values absent from the upstream response remain optional. A format descriptor reports `itag`, `mime_type`, `codecs`, `container`, `bitrate`, `width`, `height`, `fps`, `content_length`, `has_audio` and `has_video`; discovery is not a guarantee that every format can be resolved or downloaded. Only allowlisted YouTube URL forms are accepted; arbitrary network destinations and unsafe redirects are rejected.
+The successful response preserves `id`, `title`, `description`, `duration_seconds`, `channel_id`, `channel_name`, `thumbnails` and `formats`. Metadata is retrieved by the configured Apify metadata Actor. The `formats` array is empty because the Actor does not expose verified YouTube itags or direct media stream descriptors. Format availability is decided by the Apify downloader when a job runs. Only canonical, allowlisted YouTube URL forms are accepted.
 
 ## Download lifecycle
 
@@ -22,7 +22,9 @@ The successful response contains `id`, `title`, `description`, `duration_seconds
 {"url":"https://www.youtube.com/watch?v=VIDEO_ID","type":"video","format":"mp4","quality":"720p"}
 ```
 
-Audio requests use `"type":"audio"` and `"format":"original"`, `"m4a"` or `"mp3"`. Audio quality accepts `"best"` or `"worst"`, with optional `"audio_bitrate_kbps":128` for conversion (32–320 kbps). Video quality accepts `"best"`, `"worst"` or a height such as `"360p"`, `"720p"` or `"1080p"`; video output formats are `original`, `mp4` or `webm`. A requested height is a ceiling: selection chooses the best compatible available stream at or below it. Selection is constrained by the source and supported codecs. If no compatible stream exists, the job fails with a structured error.
+The downloader invokes the Apify Actor `marielise.dev~youtube-video-downloader` by default. It then fetches the resulting MP4 or MP3 into bounded local storage, converts with FFmpeg as requested, and publishes only a same-origin authenticated download route. Apify Actor processing may take minutes and incurs Apify charges.
+
+Audio requests use `"type":"audio"` and `"format":"original"`, `"m4a"` or `"mp3"`. Audio requests may include `"audio_bitrate_kbps":128` for FFmpeg conversion (32–320 kbps). The Actor returns MP3 for audio; `original` therefore maps to MP3 rather than the original YouTube audio codec. M4A uses an MP3-to-AAC transcode. Audio `quality` values are accepted for backward compatibility but do not choose an upstream audio stream. Video quality supports `best` (1080p cap), `worst` (360p) and heights 360p, 480p, 720p or 1080p; intermediate requested heights are rounded down to the supported cap. Higher and lower resolutions are unsupported by the default Actor. Video `original` maps to the Actor's MP4. WebM requests use a local VP9/Opus transcode. Actual delivered height depends on upstream availability. The existing request and response fields remain unchanged.
 
 `GET /api/v1/downloads/{job_id}` returns the job state. States are `queued`, `running`, `completed`, `failed` and `cancelled`. An example completed response has this shape:
 
@@ -70,14 +72,7 @@ Errors use JSON with a stable code and a safe message:
 
 A job can be accepted and fail later; inspect its `error` rather than treating `202` as successful extraction. Do not retry access restrictions in a loop. Queue pressure and transient network errors may be retried with bounded client backoff. No callback or webhook fields are currently accepted or delivered.
 
-Upstream redirect policy errors distinguish metadata from media. Consent,
-sign-in and verification redirects return `ACCESS_RESTRICTED` without following
-the access gate. Unknown or unsafe redirect destinations return `NETWORK` and
-remain blocked. An individual unusable media candidate is omitted when another
-validated direct stream is available; no surviving candidate returns
-`UNSUPPORTED_FORMAT`. The endpoint allowlists are unchanged. Browser terminal
-errors retain the backend reason and use code-specific recovery guidance,
-without automatically resubmitting a failed generation job.
+Apify Actor failures are mapped to stable API error codes without leaking actor responses, tokens or signed media URLs. Downloaded files remain local to the service, not on a public response endpoint. The downloader requires `APIFY_API_TOKEN` and the provider may charge for attempts or successful deliveries. Remote object links expire; the service copies them locally before marking a job completed.
 
 ## Public browser workflow
 

@@ -64,8 +64,6 @@ fn config(root: &Path, rate: u32) -> Config {
         request_timeout: Duration::from_secs(1),
         download_timeout: Duration::from_secs(10),
         ffmpeg_path: "ffmpeg".into(),
-        yt_dlp_path: "yt-dlp".into(),
-        deno_path: "deno".into(),
         requests_per_minute: rate,
         max_concurrent_requests: 1,
     }

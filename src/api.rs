@@ -113,7 +113,14 @@ pub(crate) async fn admit(state: ApiState, request: Request, next: Next) -> Resp
         return AppError::new(ErrorCode::QueueFull, "Concurrent request limit reached")
             .into_response();
     };
-    match tokio::time::timeout(state.config.request_timeout, next.run(request)).await {
+    // Metadata is supplied by a remote Actor, not a quick YouTube HTTP fetch.
+    // Preserve the short request deadline for ordinary API calls.
+    let deadline = if request.uri().path() == "/api/v1/videos/info" {
+        state.config.download_timeout
+    } else {
+        state.config.request_timeout
+    };
+    match tokio::time::timeout(deadline, next.run(request)).await {
         Ok(mut response) => {
             let body = std::mem::replace(response.body_mut(), Body::empty());
             if head || body.is_end_stream() {

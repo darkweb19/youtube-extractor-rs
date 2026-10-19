@@ -19,13 +19,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Regenerate Cargo.lock for rusty_ytdl
         run: cargo generate-lockfile
-      - name: Commit updated Cargo.lock to experimental branch
+      - name: Format Rust sources
+        run: cargo fmt --all
+      - name: Commit lockfile and formatting to experimental branch
         run: |
-          if ! git diff --quiet -- Cargo.lock; then
+          if ! git diff --quiet -- Cargo.lock src; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add Cargo.lock
-            git commit -m "build(lockfile): resolve pinned rusty_ytdl dependency tree"
+            git add Cargo.lock src
+            git commit -m "build(rusty): resolve lockfile and normalize Rust formatting"
             git push origin HEAD:fix/rust-yt-bot
           fi
       - name: Check Rust formatting

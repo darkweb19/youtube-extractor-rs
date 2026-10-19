@@ -146,9 +146,7 @@ impl Config {
                 "Timeouts and job retention must be at most seven days",
             ));
         }
-        if self.data_dir.as_os_str().is_empty()
-            || self.ffmpeg_path.as_os_str().is_empty()
-        {
+        if self.data_dir.as_os_str().is_empty() || self.ffmpeg_path.as_os_str().is_empty() {
             return Err(AppError::invalid(
                 "DATA_DIR and FFMPEG_PATH cannot be empty",
             ));

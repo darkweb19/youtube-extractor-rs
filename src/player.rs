@@ -240,7 +240,9 @@ fn helper(script: &str, obj: &str, method: &str, number: Option<usize>) -> Optio
     if compact == format!("{first}.splice(0,{second})") {
         return number.map(Op::Drop);
     }
-    let source = compact.strip_prefix("var").or_else(|| compact.strip_prefix("let"))?;
+    let source = compact
+        .strip_prefix("var")
+        .or_else(|| compact.strip_prefix("let"))?;
     let (temporary, _) = source.split_once('=')?;
     if !ident(temporary) {
         return None;
@@ -312,8 +314,10 @@ mod tests {
     #[test]
     fn only_accepts_player_script_paths() {
         assert_eq!(
-            player_script_url(r#"<script src="/s/player/cafebabe/player_ias.vflset/en_US/base.js"></script>"#)
-                .as_deref(),
+            player_script_url(
+                r#"<script src="/s/player/cafebabe/player_ias.vflset/en_US/base.js"></script>"#
+            )
+            .as_deref(),
             Some("https://www.youtube.com/s/player/cafebabe/player_ias.vflset/en_US/base.js")
         );
         assert!(

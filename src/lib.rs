@@ -9,5 +9,5 @@ pub mod media;
 pub mod model;
 pub mod network;
 pub mod player;
-pub mod storage;
 pub mod rusty_extractor;
+pub mod storage;

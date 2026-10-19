@@ -39,8 +39,9 @@ impl Extractor for YoutubeExtractor {
         let html =
             std::str::from_utf8(&bytes).map_err(|_| changed("Watch page is not valid UTF-8"))?;
         match parse_watch_page(html, &id) {
-            Err(error) if error.code == ErrorCode::UnsupportedFormat
-                && error.message.starts_with("No supported direct streams;") =>
+            Err(error)
+                if error.code == ErrorCode::UnsupportedFormat
+                    && error.message.starts_with("No supported direct streams;") =>
             {
                 let Some(url) = player_script_url(html) else {
                     return Err(error);
@@ -424,10 +425,7 @@ fn parse_format(
             };
             let decoded = decoder.decipher(value)?;
             parsed.query_pairs_mut().append_pair(key, &decoded);
-        } else if let Some((_, sig)) = pairs
-            .iter()
-            .find(|(k, _)| k == "sig" || k == "signature")
-        {
+        } else if let Some((_, sig)) = pairs.iter().find(|(k, _)| k == "sig" || k == "signature") {
             parsed.query_pairs_mut().append_pair(key, sig);
         }
         Some(parsed.to_string())
@@ -609,15 +607,12 @@ mod tests {
             parse_player_response(&public_json, &id).unwrap_err().code,
             ErrorCode::UnsupportedFormat
         );
-        let info =
-            parse_player_response_with_signature(&public_json, &id, Some(&decoder)).unwrap();
+        let info = parse_player_response_with_signature(&public_json, &id, Some(&decoder)).unwrap();
         let signed = info.formats[0].url.as_deref().unwrap();
         assert!(signed.contains("signature=edabc"));
-        assert!(
-            !serde_json::to_string(&info)
-                .unwrap()
-                .contains("signature=edabc")
-        );
+        assert!(!serde_json::to_string(&info)
+            .unwrap()
+            .contains("signature=edabc"));
     }
     #[test]
     fn bounded_scanner_rejects_truncation_and_handles_window_assignment() {

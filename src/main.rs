@@ -3,8 +3,8 @@ use tokio_util::sync::CancellationToken;
 use youtube_extractor::{
     api::{self, ApiState},
     config::Config,
-    jobs::{JobManager, JobSettings},
     download::DownloadPipeline,
+    jobs::{JobManager, JobSettings},
     media::Ffmpeg,
     network::SafeHttpClient,
     rusty_extractor::RustyYtdlExtractor,

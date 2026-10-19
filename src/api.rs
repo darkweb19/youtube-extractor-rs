@@ -213,9 +213,7 @@ async fn health(State(state): State<ApiState>) -> Response {
                 .kill_on_drop(true)
                 .output()
                 .await
-                .map_err(|_| {
-                    AppError::new(ErrorCode::Internal, "FFmpeg tools are unavailable")
-                })?;
+                .map_err(|_| AppError::new(ErrorCode::Internal, "FFmpeg tools are unavailable"))?;
             if !output.status.success() {
                 return Err(AppError::new(
                     ErrorCode::Internal,

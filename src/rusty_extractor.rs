@@ -8,7 +8,9 @@ use crate::{
     network::validate_media_url,
 };
 use async_trait::async_trait;
-use rusty_ytdl::{Video, VideoError, VideoFormat as NativeFormat};
+use rusty_ytdl::{
+    RequestOptions, Video, VideoError, VideoFormat as NativeFormat, VideoOptions,
+};
 
 #[derive(Clone, Default)]
 pub struct RustyYtdlExtractor;
@@ -18,8 +20,20 @@ impl Extractor for RustyYtdlExtractor {
     async fn video_info(&self, input: &str) -> Result<VideoInfo> {
         let id = normalize_url(input)?;
         // Never hand the original user-supplied URL to a third-party parser.
-        let video =
-            Video::new(format!("https://www.youtube.com/watch?v={id}")).map_err(classify_error)?;
+        // The upstream may rate-limit this egress IP. Never amplify a denial
+        // with the crate's automatic retry/backoff loop.
+        let options = VideoOptions {
+            request_options: RequestOptions {
+                max_retries: Some(0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let video = Video::new_with_options(
+            format!("https://www.youtube.com/watch?v={id}"),
+            options,
+        )
+        .map_err(classify_error)?;
         let source = video.get_basic_info().await.map_err(classify_error)?;
         normalize_info(id, source)
     }
@@ -37,8 +51,8 @@ fn classify_error(error: VideoError) -> AppError {
         || description.contains("private")
         || description.contains("sign in")
         || description.contains("not a bot")
-        || description.contains("confirm")
-        || description.contains("unavailable")
+        || description.contains("unusual traffic")
+        || description.contains("automated requests")
     {
         AppError::new(
             ErrorCode::AccessRestricted,
@@ -57,14 +71,37 @@ fn classify_error(error: VideoError) -> AppError {
     }
 }
 
-fn normalize_info(id: VideoId, info: rusty_ytdl::VideoInfo) -> Result<VideoInfo> {
-    let details = info.video_details;
-    if details.video_id != id.as_ref() {
+/// Fail closed on missing or mismatched player identities, but report each
+/// condition accurately. Never substitute the requested ID into a missing field.
+fn validate_player_identity(expected: &VideoId, actual: &str) -> Result<()> {
+    if actual.is_empty() {
         return Err(AppError::new(
             ErrorCode::PlayerChanged,
-            "YouTube returned a mismatched video identifier",
+            "YouTube player metadata is incomplete (missing video identifier); the upstream request may be restricted",
         ));
     }
+    if actual != expected.as_ref() {
+        return Err(AppError::new(
+            ErrorCode::PlayerChanged,
+            "YouTube returned a different video identifier",
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_info(id: VideoId, info: rusty_ytdl::VideoInfo) -> Result<VideoInfo> {
+    let details = info.video_details;
+    if details.video_id.is_empty() {
+        // rusty_ytdl defaults missing player-response fields to empty strings.
+        // Do not describe an absent ID as a response for a different video.
+        tracing::warn!(
+            reason = "missing_video_id",
+            format_count = info.formats.len(),
+            title_present = !details.title.is_empty(),
+            "rusty_ytdl returned incomplete player metadata"
+        );
+    }
+    validate_player_identity(&id, &details.video_id)?;
     if details.is_private || details.age_restricted {
         return Err(AppError::new(
             ErrorCode::AccessRestricted,
@@ -165,6 +202,40 @@ mod tests {
             "Sign in to confirm you are not a bot".to_owned(),
         ));
         assert_eq!(err.code, ErrorCode::AccessRestricted);
+    }
+
+    #[test]
+    fn missing_player_id_is_not_reported_as_a_mismatch() {
+        let expected = VideoId::new("SAFrydhpgJo").unwrap();
+        let error = validate_player_identity(&expected, "").unwrap_err();
+        assert_eq!(error.code, ErrorCode::PlayerChanged);
+        assert!(error.message.contains("missing video identifier"));
+        assert!(!error.message.contains("different video"));
+        assert!(!error.message.contains("SAFrydhpgJo"));
+    }
+
+    #[test]
+    fn mismatched_id_is_rejected_and_matching_id_is_accepted() {
+        let expected = VideoId::new("SAFrydhpgJo").unwrap();
+        assert!(validate_player_identity(&expected, "SAFrydhpgJo").is_ok());
+        let error = validate_player_identity(&expected, "dQw4w9WgXcQ").unwrap_err();
+        assert_eq!(error.code, ErrorCode::PlayerChanged);
+        assert!(error.message.contains("different video identifier"));
+        assert!(!error.message.contains("dQw4w9WgXcQ"));
+    }
+
+    #[test]
+    fn access_errors_are_distinct_from_missing_format_errors() {
+        let unavailable = classify_error(VideoError::FormatNotFound);
+        assert_eq!(unavailable.code, ErrorCode::UnsupportedFormat);
+        let denied = classify_error(VideoError::VideoPlayerResponseError(
+            "Sign in to confirm you are not a bot".into(),
+        ));
+        assert_eq!(denied.code, ErrorCode::AccessRestricted);
+        let rate_limited = classify_error(VideoError::VideoPlayerResponseError(
+            "HTTP Error 429 Too Many Requests".into(),
+        ));
+        assert_eq!(rate_limited.code, ErrorCode::UpstreamRateLimited);
     }
 
     #[test]

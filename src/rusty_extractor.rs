@@ -8,9 +8,7 @@ use crate::{
     network::validate_media_url,
 };
 use async_trait::async_trait;
-use rusty_ytdl::{
-    RequestOptions, Video, VideoError, VideoFormat as NativeFormat, VideoOptions,
-};
+use rusty_ytdl::{RequestOptions, Video, VideoError, VideoFormat as NativeFormat, VideoOptions};
 
 #[derive(Clone, Default)]
 pub struct RustyYtdlExtractor;
@@ -29,11 +27,9 @@ impl Extractor for RustyYtdlExtractor {
             },
             ..Default::default()
         };
-        let video = Video::new_with_options(
-            format!("https://www.youtube.com/watch?v={id}"),
-            options,
-        )
-        .map_err(classify_error)?;
+        let video =
+            Video::new_with_options(format!("https://www.youtube.com/watch?v={id}"), options)
+                .map_err(classify_error)?;
         let source = video.get_basic_info().await.map_err(classify_error)?;
         normalize_info(id, source)
     }

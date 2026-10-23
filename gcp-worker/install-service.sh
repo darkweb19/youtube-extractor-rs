@@ -10,6 +10,10 @@ if [ ! -f /etc/youtube-extractor.env ]; then
   echo "Edit /etc/youtube-extractor.env and set API_TOKEN before starting." >&2
   exit 2
 fi
+if sudo grep -Eq '^API_TOKEN=(REPLACE_|$)' /etc/youtube-extractor.env; then
+  echo "Configure a unique API_TOKEN in /etc/youtube-extractor.env before installing." >&2
+  exit 2
+fi
 sudo systemctl daemon-reload
 sudo systemctl enable --now youtube-extractor
 sudo systemctl status youtube-extractor --no-pager

@@ -78,3 +78,48 @@ curl -fsS http://127.0.0.1:8080/health
 
 WARP behavior can change, and the network path is not guaranteed to stay usable
 for all videos. Download only media you are permitted to retrieve.
+
+## Railway controller configuration
+
+Provision a scoped Google Cloud service account with permissions to inspect,
+start and stop only this VM: `compute.instances.get`,
+`compute.instances.start`, and `compute.instances.stop`.
+Give Railway its JSON service account credential as one **secret** variable
+(`GCP_SERVICE_ACCOUNT_JSON`); do not store it in source files or logs. Rotate
+the key if it has been exposed. Cloudflare Access service tokens must be
+authorized for the worker's hostname.
+
+```dotenv
+EXTRACTOR_MODE=remote
+GCP_PROJECT_ID=your-project-id
+GCP_ZONE=us-central1-a
+GCP_INSTANCE_NAME=instance-20261023-153455
+GCP_WORKER_URL=https://worker.example.com
+GCP_WORKER_TOKEN=<same random token as worker API_TOKEN>
+CF_ACCESS_CLIENT_ID=<access service token client ID>
+CF_ACCESS_CLIENT_SECRET=<access service token secret>
+GCP_SERVICE_ACCOUNT_JSON=<single-line service account JSON>
+GCP_IDLE_TIMEOUT_SECS=300
+GCP_START_TIMEOUT_SECS=300
+# To forward 5 jobs and let GCP execute 2 at once:
+WORKERS=5
+QUEUE_CAPACITY=16
+DOWNLOAD_TIMEOUT_SECS=3600
+```
+
+Run a single Railway replica with persistent `DATA_DIR`. GCP worker uses
+`WORKERS=2`. Only GCP makes YouTube requests; Railway receives a completed
+file and can perform further local FFmpeg processing. The current yt-dlp worker
+can also use FFmpeg locally to merge YouTube's separate audio/video streams,
+so FFmpeg is installed in both environments.
+
+### Failure/restart limits
+
+Queued Railway jobs are replayed from persistent job records after a restart;
+running jobs are marked interrupted rather than silently double-dispatched.
+Use the Google Cloud maximum-VM-runtime scheduling policy as the independent
+runaway-cost guard. The code uses a single-process lifecycle lock and therefore
+is **not** safe for multiple independent Railway replicas; a multi-replica
+deployment requires a distributed lease and durable dispatch attempts.
+Transient HTTP dispatch failures are retried with an idempotency key; this
+does not promise automatic retry of a failed yt-dlp extraction.

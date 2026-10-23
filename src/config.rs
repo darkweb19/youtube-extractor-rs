@@ -1,6 +1,6 @@
 use std::{
     env, fmt,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     path::PathBuf,
     str::FromStr,
     time::Duration,

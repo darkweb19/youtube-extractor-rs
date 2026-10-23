@@ -16,7 +16,7 @@ use base64::{
 use reqwest::{Client, Method, StatusCode, Url};
 use ring::{
     rand::SystemRandom,
-    signature::{KeyPair, RsaKeyPair, RSA_PKCS1_SHA256},
+    signature::{RsaKeyPair, RSA_PKCS1_SHA256},
 };
 use serde::Deserialize;
 use serde_json::{json, Value};

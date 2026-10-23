@@ -59,7 +59,7 @@ before horizontally scaling one shared job namespace.
 | `network` | Validates media hosts/IPs, redirects, DNS and bounded outbound transfers |
 | `download` | Production format selection, streamed transfers, retries and progress |
 | `media` | Bounded local FFmpeg conversion/merge and FFprobe validation |
-| `rusty_extractor` | Native crate adapter and mapping to sanitized public metadata/stream formats |
+| `ytdlp` | Managed yt-dlp subprocess for sanitized metadata and cancellable media downloading |
 | `storage` | Managed local paths, completed output, cleanup and durable local records |
 | `jobs` | Admission, bounded execution, state transitions, cancellation and retention |
 
@@ -75,10 +75,10 @@ automated-access challenges.
 ```mermaid
 flowchart LR
   Client -->|Bearer token| API[Axum API]
-  API -->|metadata| Extractor[rusty_ytdl adapter]
+  API -->|metadata| Extractor[yt-dlp adapter]
   API -->|submit/status/cancel| Jobs[Rust job manager]
   Jobs --> Extractor
-  Jobs --> Transfer[Bounded Rust streaming downloader]
+  Jobs --> Transfer[yt-dlp media download]
   Transfer -->|local files| FFMPEG[FFmpeg processing]
   FFMPEG --> Storage[Local storage]
   API -->|authorized download| Storage

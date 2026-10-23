@@ -1,3 +1,5 @@
+> **Runtime note (2026-10-23):** The active extractor is now yt-dlp 2026.10.21, backed by EJS scripts and Node.js. The native player parser, signature and manifest discussion below describes legacy code retained for unit tests, not the active YouTube download engine.
+
 # YouTube protocol support and legacy parser
 
 ## Experimental active path: rusty_ytdl

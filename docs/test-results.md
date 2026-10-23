@@ -1,5 +1,7 @@
 # Verification results
 
+> **yt-dlp migration (2026-10-23):** The runtime changed to yt-dlp 2026.10.21 and Node.js 24. The historical results below predate this migration. Passing unit tests and container checks does not establish successful live YouTube extraction or Railway access.
+
 > **Experimental branch update (2026-10-19):** `fix/rust-yt-bot` uses
 > `rusty_ytdl` with the Rust media pipeline. The test results below are
 > historical and do not represent deployment acceptance for this experimental

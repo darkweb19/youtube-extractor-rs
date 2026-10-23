@@ -35,7 +35,7 @@ docker run --rm --name youtube-extractor \
   youtube-extractor:local
 ```
 
-The pinned Rust builder compiles `rusty_ytdl` with the committed Cargo.lock. The Debian runtime installs FFmpeg, `ffprobe` and `curl` only, then runs as UID/GID `10001:10001`. No source, Rust compiler or session credentials are copied into the runtime. Base version tags are explicit; release operators should additionally lock reviewed base image digests and refresh them for security updates.
+The pinned Rust builder compiles the Axum API. The Debian runtime installs yt-dlp 2026.10.21 and its packaged `yt-dlp-ejs` solver in a Python virtual environment, Node.js 24, FFmpeg, `ffprobe` and `curl`. It runs as UID/GID `10001:10001`; no Rust compiler or session credentials are shipped. Base version tags are explicit; release operators should additionally lock reviewed base image digests and refresh them for security updates.
 
 In managed Codex environments, supply session CA trust through optional BuildKit secret mounts; never copy it into the image or disable TLS verification:
 
@@ -51,12 +51,17 @@ Keep the environment's supplied Docker proxy defaults and registry credentials. 
 
 Configured `HTTPS_PROXY`/`ALL_PROXY` (and their lowercase equivalents) are trusted infrastructure: the proxy owns remote DNS and destination connection enforcement. Direct connections resolve only public IP addresses and pin them for the request. Local address pinning cannot enforce the proxy's remote DNS resolution; configure any outbound proxy to deny private/reserved destinations and enforce the same destination policy. Application URL and redirect allowlists remain enforced in either mode. Do not accept proxy settings from API clients.
 
+## yt-dlp runtime
+
+The active extractor is the managed yt-dlp subprocess. Select its binary using `YTDLP_PATH` (default `yt-dlp`; container `/usr/local/bin/yt-dlp`). Node.js is enabled with `--js-runtimes node` and EJS scripts ship with `yt-dlp[default]`. The container build checks both binaries. This does **not** solve YouTube's automated-access restrictions against Railway egress IPs.
+
 ## Configuration
 
 `.env.example` is the authoritative editable example. The service reads process environment variables; it does not load dotenv files automatically.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `YTDLP_PATH` | `yt-dlp` | Path to the yt-dlp executable (container sets `/usr/local/bin/yt-dlp`) |
 | `API_TOKEN` | required | Shared bearer token, at least 32 characters, no whitespace |
 | `ALLOW_UNAUTHENTICATED` | `false` | Explicit local development only, with no token configured |
 | `PORT` | `8080` | Listen port on all IPv4 interfaces |

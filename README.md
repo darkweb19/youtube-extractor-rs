@@ -1,14 +1,10 @@
-# YouTube extraction service (Rust / Axum + rusty_ytdl)
+# YouTube extraction service (Rust / Axum + yt-dlp)
 
-A Rust/Axum service for authenticated asynchronous YouTube downloads and metadata. **The experimental `fix/rust-yt-bot` branch uses the native Rust `rusty_ytdl` crate (version 0.7.4) for YouTube stream discovery**, the existing bounded Rust HTTP downloader for transfers, and FFmpeg for local media output. Python yt-dlp and Deno are not required on this branch.
+The `fix/rust-yt-bot` branch uses **yt-dlp 2026.10.21** for both YouTube metadata discovery and media downloading. Rust/Axum continues to handle authentication, the unchanged HTTP API and browser UI, job lifecycle, cancellation, storage and file delivery. FFmpeg handles media post-processing.
 
-The earlier custom parser remains in `src/extractor.rs` for regression fixtures. The active adapter is `src/rusty_extractor.rs`, and the existing `DownloadPipeline` retains limits, retries, cancellation and artifact publication.
+The active adapter is `src/ytdlp.rs`. The old native player parser is retained for regression tests but `rusty_ytdl` is removed. The production Docker image installs pinned yt-dlp with its packaged EJS solver and Node.js 24; no Cloudflare WARP or IP rotation is configured.
 
-Use only publicly accessible media you are authorized to download. The service does not bypass DRM, sign-in requirements, CAPTCHA, or upstream access restrictions. A native implementation cannot fix a hosting provider's outbound-IP restriction.
-
-The Rust crate is an experiment and may lag current YouTube protocol changes; a healthy service does not mean Railway's outbound IP is permitted by YouTube. A local end-to-end test is mandatory; hosting acceptance requires live tests from the deployed service. See [architecture](docs/architecture.md), [API](docs/api.md), and [deployment](docs/deployment.md).
-
-See [protocol support](docs/protocol-support.md) for the exact supported parser and stream surface, JavaScript evaluation decision and manifest roadmap.
+**Network restriction remains:** changing to yt-dlp does not fix a YouTube block on Railway's outbound IP. Test real metadata and authorized media retrieval from the deployed service; `/health` and fixture tests do not prove YouTube access.
 
 ## Browser interface
 
@@ -25,7 +21,7 @@ Authenticated video preview downloads the MP4 into a browser Blob because a nati
 
 ### Run locally
 
-Install the pinned Rust toolchain and FFmpeg (`ffmpeg` and `ffprobe`). On macOS: `brew install ffmpeg jq`. The first build also resolves the `rusty_ytdl` crate from the committed `Cargo.lock`. Python yt-dlp and Deno are not used by the application on this branch.
+Install the pinned Rust toolchain and FFmpeg (`ffmpeg` and `ffprobe`). On macOS: `brew install ffmpeg jq`. The Rust build uses the committed `Cargo.lock`. Local runs additionally require yt-dlp 2026.10.21, its `yt-dlp-ejs` scripts, Node.js 22+ and FFmpeg; the Docker image supplies these.
 
 Generate a strong API token, for example with `openssl rand -hex 32`, and store it in your local `.env` or hosting provider's secret settings. Use the same token in your API clients.
 
@@ -182,7 +178,7 @@ Use a long-running Docker service with persistent storage and one instance. The 
 | Fly.io | Deploy the Dockerfile to a Fly Machine; route the HTTP service to internal port `8080` and enable HTTPS. | Mount a Fly Volume at `/data` in the Machine's region, set `PORT=8080` and `DATA_DIR=/data`, store `API_TOKEN` as a Fly secret, and keep one Machine. Disable automatic stopping while background jobs must continue. |
 | Other Docker hosts | Build this Dockerfile or push the built image to your registry. Route the platform's HTTP service to the configured `PORT`. | Supply the token through secret settings, persistent writable storage at `/data`, `/health` checks, explicit resource limits, and one application instance. |
 
-Check volume permissions for UID/GID `10001:10001` on every platform. The Dockerfile builds a standalone Rust binary and installs FFmpeg; it does not include yt-dlp or Deno. Keep Rust dependencies updated because YouTube may change its player. Diskless or scale-to-zero deployments can lose local state or interrupt background jobs; the current architecture requires persistent storage and a running worker process. Horizontal scaling needs a shared durable queue/database and object storage, which are not implemented.
+Check volume permissions for UID/GID `10001:10001` on every platform. The Dockerfile builds the Rust API and installs yt-dlp, Node.js, EJS scripts and FFmpeg. Keep yt-dlp and its JavaScript challenge solver updated when YouTube changes. Diskless or scale-to-zero deployments can lose local state or interrupt background jobs; the current architecture requires persistent storage and a running worker process. Horizontal scaling needs a shared durable queue/database and object storage, which are not implemented.
 
 ### Configuration and operations
 
@@ -207,7 +203,7 @@ The storage budget can reject admission before the queue fills. A remux usually 
 | `/health` returns `503` | Writable `DATA_DIR`, volume ownership, and FFmpeg/FFprobe availability |
 | `NETWORK` / `DNS` | Host DNS, outbound HTTPS policy, proxy trust, and allowed YouTube/media destinations |
 | `ACCESS_RESTRICTED` | Upstream content or automated-access restriction; do not bypass it |
-| `UNSUPPORTED_FORMAT` | `rusty_ytdl` could not supply supported direct streams or a matching compatible output |
+| `UNSUPPORTED_FORMAT` | `yt-dlp` could not supply compatible output streams or a matching compatible output |
 | `QUEUE_FULL` / `RATE_LIMITED` | Worker, queue, storage, retention, and request-rate limits; back off before retrying |
 
 ## Development and verification

@@ -74,6 +74,7 @@ struct Settings {
     idle: Duration,
     start_timeout: Duration,
     max_bytes: u64,
+    max_attempts: usize,
 }
 
 #[derive(Deserialize)]
@@ -178,6 +179,11 @@ impl Remote {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| bad("Worker HTTP client unavailable"))?;
+        let max_attempts = env::var("GCP_MAX_JOB_ATTEMPTS").ok()
+            .and_then(|v| v.parse::<usize>().ok()).unwrap_or(2);
+        if !(1..=3).contains(&max_attempts) {
+            return Err(AppError::invalid("GCP_MAX_JOB_ATTEMPTS must be between 1 and 3"));
+        }
         Ok(Arc::new(Self {
             settings: Settings {
                 project: label("GCP_PROJECT_ID")?,
@@ -192,6 +198,7 @@ impl Remote {
                 idle: Duration::from_secs(idle),
                 start_timeout: Duration::from_secs(start_timeout),
                 max_bytes,
+                max_attempts,
             },
             cloud,
             worker: worker_http,
@@ -432,6 +439,67 @@ impl Remote {
         Ok(())
     }
 
+    async fn run_attempt(
+        &self,
+        request: &DownloadRequest,
+        local: Uuid,
+        remote: Uuid,
+        cancel: &CancellationToken,
+        progress: &watch::Sender<DownloadProgress>,
+    ) -> Result<StoredOutput> {
+        let mut dispatched = None;
+        for attempt in 0..2 {
+            match self.worker_req(Method::POST, "/api/v1/downloads")
+                .header("X-Idempotency-Key", remote.to_string())
+                .json(request).send().await
+            {
+                Ok(response) => {
+                    dispatched = Some(response);
+                    break;
+                }
+                Err(_) if attempt == 0 => tokio::time::sleep(Duration::from_secs(2)).await,
+                Err(_) => return Err(bad("Cannot dispatch job to GCP")),
+            }
+        }
+        let response = dispatched.ok_or_else(|| bad("GCP dispatch unavailable"))?;
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            return Err(AppError::new(ErrorCode::QueueFull, "GCP queue is full"));
+        }
+        if !response.status().is_success() {
+            return Err(bad("GCP refused download request"));
+        }
+        let job: WorkerJob = response.json().await
+            .map_err(|_| bad("Invalid GCP dispatch reply"))?;
+        if job.job_id != remote {
+            return Err(bad("GCP returned a different job identifier"));
+        }
+        let result = async {
+            loop {
+                let view = tokio::select! {
+                    _ = cancel.cancelled() => return Err(AppError::new(ErrorCode::Cancelled, "Job cancelled")),
+                    reply = self.worker_job(remote) => reply?,
+                };
+                let _ = progress.send(view.progress);
+                match view.status.as_str() {
+                    "completed" => {
+                        let output = view.output.ok_or_else(|| bad("Worker returned no completed file"))?;
+                        return self.retrieve(local, remote, &output, cancel).await;
+                    }
+                    "failed" => return Err(AppError::new(ErrorCode::DownloadInterrupted, "GCP download failed")),
+                    "cancelled" => return Err(AppError::new(ErrorCode::Cancelled, "GCP download cancelled")),
+                    "queued" | "running" => (),
+                    _ => return Err(bad("Unknown GCP job state")),
+                }
+                tokio::select! {
+                    _ = cancel.cancelled() => return Err(AppError::new(ErrorCode::Cancelled, "Job cancelled")),
+                    _ = tokio::time::sleep(Duration::from_secs(3)) => (),
+                }
+            }
+        }.await;
+        self.cancel_worker(remote).await;
+        result
+    }
+
     async fn worker_job(&self, id: Uuid) -> Result<WorkerJob> {
         let path = format!("/api/v1/downloads/{id}");
         let response = self
@@ -552,66 +620,29 @@ impl JobExecutor for Remote {
             _ = cancel.cancelled() => return Err(AppError::new(ErrorCode::Cancelled, "Job cancelled")),
             start = self.ensure_ready() => start?,
         }
-        if cancel.is_cancelled() {
-            return Err(AppError::new(ErrorCode::Cancelled, "Job cancelled"));
-        }
-        let mut dispatched = None;
-        for attempt in 0..2 {
-            match self
-                .worker_req(Method::POST, "/api/v1/downloads")
-                .header("X-Idempotency-Key", id.to_string())
-                .json(request)
-                .send()
-                .await
-            {
-                Ok(response) => {
-                    dispatched = Some(response);
-                    break;
-                }
-                Err(_) if attempt == 0 => tokio::time::sleep(Duration::from_secs(2)).await,
-                Err(_) => return Err(bad("Cannot dispatch job to GCP")),
+        for attempt in 0..self.settings.max_attempts {
+            if cancel.is_cancelled() {
+                return Err(AppError::new(ErrorCode::Cancelled, "Job cancelled"));
             }
-        }
-        let response = dispatched.ok_or_else(|| bad("GCP dispatch unavailable"))?;
-        if response.status() == StatusCode::TOO_MANY_REQUESTS {
-            return Err(AppError::new(ErrorCode::QueueFull, "GCP queue is full"));
-        }
-        if !response.status().is_success() {
-            return Err(bad("GCP refused download request"));
-        }
-        let job: WorkerJob = response
-            .json()
-            .await
-            .map_err(|_| bad("Invalid GCP dispatch reply"))?;
-        let remote = job.job_id;
-        if remote != id {
-            return Err(bad("GCP returned a different job identifier"));
-        }
-        let result = async {
-            loop {
-                let view = tokio::select! {
-                    _ = cancel.cancelled() => return Err(AppError::new(ErrorCode::Cancelled, "Job cancelled")),
-                    reply = self.worker_job(remote) => reply?,
-                };
-                let _ = progress.send(view.progress);
-                match view.status.as_str() {
-                    "completed" => {
-                        let output = view.output.ok_or_else(|| bad("Worker returned no completed file"))?;
-                        return self.retrieve(id, remote, &output, &cancel).await;
+            // First attempt uses Railway's UUID. Subsequent attempts are independent,
+            // but each retries uncertain HTTP delivery with a stable idempotency key.
+            let remote = if attempt == 0 { id } else { Uuid::new_v4() };
+            let result = self.run_attempt(request, id, remote, &cancel, &progress).await;
+            match result {
+                Ok(output) => return Ok(output),
+                Err(error) if error.code == ErrorCode::DownloadInterrupted
+                    && attempt + 1 < self.settings.max_attempts && !cancel.is_cancelled() =>
+                {
+                    tracing::warn!(job_id=%id, attempt=attempt+1, "Retrying interrupted extraction");
+                    tokio::select! {
+                        _ = cancel.cancelled() => return Err(AppError::new(ErrorCode::Cancelled, "Job cancelled")),
+                        _ = tokio::time::sleep(Duration::from_secs(3)) => (),
                     }
-                    "failed" => return Err(AppError::new(ErrorCode::DownloadInterrupted, "GCP download failed")),
-                    "cancelled" => return Err(AppError::new(ErrorCode::Cancelled, "GCP download cancelled")),
-                    "queued" | "running" => (),
-                    _ => return Err(bad("Unknown GCP job state")),
                 }
-                tokio::select! {
-                    _ = cancel.cancelled() => return Err(AppError::new(ErrorCode::Cancelled, "Job cancelled")),
-                    _ = tokio::time::sleep(Duration::from_secs(3)) => (),
-                }
+                Err(error) => return Err(error),
             }
-        }.await;
-        self.cancel_worker(remote).await;
-        result
+        }
+        Err(bad("Remote job attempts exhausted"))
     }
 
     async fn cleanup(&self, id: Uuid) -> Result<()> {

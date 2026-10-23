@@ -101,6 +101,7 @@ CF_ACCESS_CLIENT_SECRET=<access service token secret>
 GCP_SERVICE_ACCOUNT_JSON=<single-line service account JSON>
 GCP_IDLE_TIMEOUT_SECS=300
 GCP_START_TIMEOUT_SECS=300
+GCP_MAX_JOB_ATTEMPTS=2
 # To forward 5 jobs and let GCP execute 2 at once:
 WORKERS=5
 QUEUE_CAPACITY=16
@@ -121,5 +122,7 @@ Use the Google Cloud maximum-VM-runtime scheduling policy as the independent
 runaway-cost guard. The code uses a single-process lifecycle lock and therefore
 is **not** safe for multiple independent Railway replicas; a multi-replica
 deployment requires a distributed lease and durable dispatch attempts.
-Transient HTTP dispatch failures are retried with an idempotency key; this
-does not promise automatic retry of a failed yt-dlp extraction.
+Transient HTTP dispatch failures are retried with an idempotency key.
+Interrupted yt-dlp extractions are retried at most once by default; access
+restrictions, invalid requests, cancellations and exhausted queues are not
+repeated indefinitely.

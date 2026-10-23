@@ -1,0 +1,20 @@
+name: GCP remote integration compile and tests
+on:
+  push:
+    branches: [fix/rust-yt-bot]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Validate deployment scripts
+        run: bash -n gcp-worker/*.sh
+      - name: Compile all targets
+        run: cargo check --locked --all-targets
+      - name: Run regression tests
+        run: cargo test --locked --all-targets

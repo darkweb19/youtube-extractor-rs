@@ -179,10 +179,14 @@ impl Remote {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| bad("Worker HTTP client unavailable"))?;
-        let max_attempts = env::var("GCP_MAX_JOB_ATTEMPTS").ok()
-            .and_then(|v| v.parse::<usize>().ok()).unwrap_or(2);
+        let max_attempts = env::var("GCP_MAX_JOB_ATTEMPTS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(2);
         if !(1..=3).contains(&max_attempts) {
-            return Err(AppError::invalid("GCP_MAX_JOB_ATTEMPTS must be between 1 and 3"));
+            return Err(AppError::invalid(
+                "GCP_MAX_JOB_ATTEMPTS must be between 1 and 3",
+            ));
         }
         Ok(Arc::new(Self {
             settings: Settings {
@@ -449,9 +453,12 @@ impl Remote {
     ) -> Result<StoredOutput> {
         let mut dispatched = None;
         for attempt in 0..2 {
-            match self.worker_req(Method::POST, "/api/v1/downloads")
+            match self
+                .worker_req(Method::POST, "/api/v1/downloads")
                 .header("X-Idempotency-Key", remote.to_string())
-                .json(request).send().await
+                .json(request)
+                .send()
+                .await
             {
                 Ok(response) => {
                     dispatched = Some(response);
@@ -468,7 +475,9 @@ impl Remote {
         if !response.status().is_success() {
             return Err(bad("GCP refused download request"));
         }
-        let job: WorkerJob = response.json().await
+        let job: WorkerJob = response
+            .json()
+            .await
             .map_err(|_| bad("Invalid GCP dispatch reply"))?;
         if job.job_id != remote {
             return Err(bad("GCP returned a different job identifier"));
@@ -627,11 +636,15 @@ impl JobExecutor for Remote {
             // First attempt uses Railway's UUID. Subsequent attempts are independent,
             // but each retries uncertain HTTP delivery with a stable idempotency key.
             let remote = if attempt == 0 { id } else { Uuid::new_v4() };
-            let result = self.run_attempt(request, id, remote, &cancel, &progress).await;
+            let result = self
+                .run_attempt(request, id, remote, &cancel, &progress)
+                .await;
             match result {
                 Ok(output) => return Ok(output),
-                Err(error) if error.code == ErrorCode::DownloadInterrupted
-                    && attempt + 1 < self.settings.max_attempts && !cancel.is_cancelled() =>
+                Err(error)
+                    if error.code == ErrorCode::DownloadInterrupted
+                        && attempt + 1 < self.settings.max_attempts
+                        && !cancel.is_cancelled() =>
                 {
                     tracing::warn!(job_id=%id, attempt=attempt+1, "Retrying interrupted extraction");
                     tokio::select! {

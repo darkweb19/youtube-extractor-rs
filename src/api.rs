@@ -221,6 +221,29 @@ async fn health(State(state): State<ApiState>) -> Response {
                 ));
             }
         }
+        if std::env::var("YTDLP_PROXY_REQUIRED").as_deref() == Ok("true") {
+            let proxy = std::env::var("YTDLP_PROXY")
+                .map_err(|_| AppError::internal("Worker proxy is not configured"))?;
+            let url = url::Url::parse(&proxy)
+                .map_err(|_| AppError::internal("Worker proxy URL is invalid"))?;
+            if url.scheme() != "socks5" || url.host_str() != Some("127.0.0.1") {
+                return Err(AppError::internal("Worker proxy must be local SOCKS5"));
+            }
+            let port = url.port().ok_or_else(|| AppError::internal("Proxy port is missing"))?;
+            tokio::time::timeout(Duration::from_secs(2), tokio::net::TcpStream::connect(("127.0.0.1", port)))
+                .await
+                .map_err(|_| AppError::internal("WARP proxy is unavailable"))?
+                .map_err(|_| AppError::internal("WARP proxy is unavailable"))?;
+            let status = tokio::process::Command::new("warp-cli")
+                .arg("status")
+                .output()
+                .await
+                .map_err(|_| AppError::internal("WARP status is unavailable"))?;
+            let status_text = String::from_utf8_lossy(&status.stdout);
+            if !status.status.success() || !status_text.contains("Connected") || status_text.contains("Disconnected") {
+                return Err(AppError::internal("WARP is not connected"));
+            }
+        }
         Ok::<_, AppError>(())
     };
     let ready = matches!(

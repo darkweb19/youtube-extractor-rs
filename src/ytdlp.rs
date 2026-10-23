@@ -63,6 +63,11 @@ impl YtDlp {
             "--js-runtimes",
             "node",
         ]);
+        if let Ok(proxy) = std::env::var("YTDLP_PROXY") {
+            if !proxy.is_empty() {
+                cmd.args(["--proxy", &proxy, "--downloader", "native"]);
+            }
+        }
         cmd.stdin(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true);

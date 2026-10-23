@@ -1,0 +1,25 @@
+[Unit]
+Description=YouTube extractor private GCP worker
+Wants=network-online.target
+Requires=warp-svc.service
+After=network-online.target warp-svc.service
+
+[Service]
+Type=simple
+User=extractor
+Group=extractor
+EnvironmentFile=/etc/youtube-extractor.env
+ExecStartPre=/usr/bin/test -S /run/warp-svc.sock
+ExecStart=/usr/local/bin/youtube-extractor
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=40
+KillMode=control-group
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/youtube-extractor
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

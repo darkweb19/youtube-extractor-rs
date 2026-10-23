@@ -76,6 +76,8 @@ pub struct JobRecord {
     pub expires_at: u64,
     #[serde(default)]
     pub cleanup_pending: bool,
+    #[serde(default, skip_serializing)]
+    pub request: Option<DownloadRequest>,
 }
 struct Entry {
     record: JobRecord,
@@ -217,7 +219,18 @@ impl JobManager {
             if record.job_id != id {
                 return Err(storage_error());
             }
-            if record.status.active()
+            let can_requeue = record.status == JobStatus::Queued
+                && record.request.is_some()
+                && record.expires_at > now();
+            let requeued = if can_requeue {
+                self.sender.try_send(Work {
+                    id,
+                    request: record.request.clone().expect("checked"),
+                }).is_ok()
+            } else {
+                false
+            };
+            if (record.status.active() && !requeued)
                 || record.status == JobStatus::Cancelled
                 || record.cleanup_pending
             {
@@ -330,6 +343,7 @@ impl JobManager {
             updated_at: now(),
             expires_at: now().saturating_add(self.settings.ttl.as_secs()),
             cleanup_pending: false,
+            request: Some(request.clone()),
         };
         self.persist(&record).await?;
         entries.insert(

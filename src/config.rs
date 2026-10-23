@@ -71,7 +71,10 @@ impl Config {
         }
         let config = Self {
             bind_addr: SocketAddr::new(
-                IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                lookup("BIND_HOST")
+                    .unwrap_or_else(|| "0.0.0.0".into())
+                    .parse::<IpAddr>()
+                    .map_err(|_| AppError::invalid("BIND_HOST must be an IP address"))?,
                 number(&lookup, "PORT", 8080_u16)?,
             ),
             api_token,

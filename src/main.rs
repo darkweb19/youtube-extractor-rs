@@ -3,7 +3,9 @@ use tokio_util::sync::CancellationToken;
 use youtube_extractor::{
     api::{self, ApiState},
     config::Config,
-    jobs::{JobManager, JobSettings},
+    jobs::{JobExecutor, JobManager, JobSettings},
+    extractor::Extractor,
+    remote::Remote,
     media::Ffmpeg,
     storage::LocalStorage,
     ytdlp::YtDlp,
@@ -29,15 +31,35 @@ async fn run() -> youtube_extractor::error::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| "ffprobe".into());
     let ffmpeg = Ffmpeg::new(config.ffmpeg_path.clone(), probe, config.download_timeout);
-    let ytdlp = Arc::new(YtDlp::new(
-        std::env::var_os("YTDLP_PATH")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| "yt-dlp".into()),
-        storage,
-        ffmpeg,
-        config.download_timeout,
-        config.max_download_bytes,
-    ));
+    let mode = std::env::var("EXTRACTOR_MODE").unwrap_or_else(|_| "local".into());
+    let (extractor, executor): (Arc<dyn Extractor>, Arc<dyn JobExecutor>) =
+        if mode == "remote" {
+            let remote = Remote::from_env(storage.clone(), config.max_download_bytes)?;
+            remote.start_idle_watch();
+            (remote.clone(), remote)
+        } else if mode == "local" {
+            if std::env::var("YTDLP_PROXY_REQUIRED").as_deref() == Ok("true")
+                && !std::env::var("YTDLP_PROXY").is_ok_and(|v| v.starts_with("socks5://127.0.0.1:"))
+            {
+                return Err(youtube_extractor::error::AppError::invalid(
+                    "GCP worker mode requires a local WARP SOCKS5 proxy",
+                ));
+            }
+            let local = Arc::new(YtDlp::new(
+                std::env::var_os("YTDLP_PATH")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| "yt-dlp".into()),
+                storage,
+                ffmpeg,
+                config.download_timeout,
+                config.max_download_bytes,
+            ));
+            (local.clone(), local)
+        } else {
+            return Err(youtube_extractor::error::AppError::invalid(
+                "EXTRACTOR_MODE must be local or remote",
+            ));
+        };
     let jobs = JobManager::new(
         JobSettings {
             data_dir: config.data_dir.clone(),
@@ -49,10 +71,10 @@ async fn run() -> youtube_extractor::error::Result<()> {
             ttl: config.job_ttl,
             timeout: config.download_timeout,
         },
-        ytdlp.clone(),
+        executor,
     )
     .await?;
-    let app = api::router(ApiState::new(config.clone(), ytdlp, jobs.clone()));
+    let app = api::router(ApiState::new(config.clone(), extractor, jobs.clone()));
     let listener = tokio::net::TcpListener::bind(config.bind_addr)
         .await
         .map_err(|_| {

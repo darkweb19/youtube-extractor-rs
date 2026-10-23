@@ -240,3 +240,13 @@ The optional metadata-only probe runs with `AUTHORIZED_TEST_YOUTUBE_URL` set and
 The initial service uses a bounded in-process worker pool and a bounded queue, streamed downloads with per-job limits, local job/output storage, cancellation and expiration. It is independently deployable from other applications. Local state requires one replica and a persistent volume on Railway; it does not implement distributed job ownership or an S3 backend. Callbacks and signed webhook delivery are future API extensions.
 
 Do not count the writable container layer as durable storage. Mount `/data`, retain an appropriate disk budget, and follow the restart/recovery behavior in the deployment guide. Live YouTube compatibility and deployment status must be assessed separately from local tests.
+
+## On-demand Compute Engine extraction (branch-only)
+
+To keep Railway always available but only pay for GCP while downloading, set
+`EXTRACTOR_MODE=remote` on Railway and follow [gcp-worker/README.md](gcp-worker/README.md).
+The same Rust binary is packaged by `gcp-worker/package.sh` and installed
+as a GCP-only service; this preserves the existing authenticated v1 API and
+UI. GCP uses `YTDLP_PROXY=socks5://127.0.0.1:40000`, while Railway starts
+and stops the VM through the Google Compute Engine API. Do not enable remote
+mode until the worker, WARP, Cloudflare Tunnel/Access and IAM are configured.

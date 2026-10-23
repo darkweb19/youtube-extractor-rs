@@ -76,7 +76,7 @@ pub struct JobRecord {
     pub expires_at: u64,
     #[serde(default)]
     pub cleanup_pending: bool,
-    #[serde(default, skip_serializing)]
+    #[serde(default)]
     pub request: Option<DownloadRequest>,
 }
 struct Entry {

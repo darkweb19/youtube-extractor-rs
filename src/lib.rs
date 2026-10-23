@@ -11,3 +11,5 @@ pub mod network;
 pub mod player;
 pub mod storage;
 pub mod ytdlp;
+
+pub mod remote;

@@ -207,6 +207,13 @@ impl YtDlp {
         let mut child = command
             .spawn()
             .map_err(|_| AppError::new(ErrorCode::Internal, "yt-dlp executable is unavailable"))?;
+        let stall_timeout = std::env::var("STALL_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| (30..=1800).contains(v))
+            .unwrap_or(180);
+        let mut last_growth = tokio::time::Instant::now();
+        let mut previous_bytes = 0_u64;
         let mut quota_tick = tokio::time::interval(Duration::from_millis(250));
         let deadline = tokio::time::Instant::now() + self.timeout;
         let result: Result<()> = loop {
@@ -220,6 +227,14 @@ impl YtDlp {
                 }
                 _ = quota_tick.tick() => {
                     let bytes = workspace_bytes(dir).await?;
+                    if bytes > previous_bytes {
+                        previous_bytes = bytes;
+                        last_growth = tokio::time::Instant::now();
+                    }
+                    if last_growth.elapsed() >= Duration::from_secs(stall_timeout) {
+                        break Err(AppError::new(ErrorCode::Timeout,
+                            "yt-dlp stopped making download progress"));
+                    }
                     let _ = progress.send(DownloadProgress {
                         downloaded_bytes: bytes,
                         total_bytes: None,

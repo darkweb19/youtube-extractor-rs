@@ -9,9 +9,15 @@ use crate::{
     storage::{LocalStorage, Storage, StoredOutput},
 };
 use async_trait::async_trait;
-use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine as _,
+};
 use reqwest::{Client, Method, StatusCode, Url};
-use ring::{rand::SystemRandom, signature::{KeyPair, RsaKeyPair, RSA_PKCS1_SHA256}};
+use ring::{
+    rand::SystemRandom,
+    signature::{KeyPair, RsaKeyPair, RSA_PKCS1_SHA256},
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
@@ -22,7 +28,11 @@ use std::{
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::{fs, io::AsyncWriteExt, sync::{watch, Mutex}};
+use tokio::{
+    fs,
+    io::AsyncWriteExt,
+    sync::{watch, Mutex},
+};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -31,13 +41,21 @@ fn bad(message: &'static str) -> AppError {
 }
 
 fn required(name: &'static str) -> Result<String> {
-    env::var(name).ok().filter(|s| !s.trim().is_empty())
+    env::var(name)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| AppError::invalid(format!("{name} must be configured for remote mode")))
 }
 fn label(name: &'static str) -> Result<String> {
     let v = required(name)?;
-    if v.len() > 100 || !v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
-        return Err(AppError::invalid(format!("{name} must be an ASCII cloud identifier")));
+    if v.len() > 100
+        || !v
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(AppError::invalid(format!(
+            "{name} must be an ASCII cloud identifier"
+        )));
     }
     Ok(v)
 }
@@ -114,34 +132,52 @@ impl Remote {
     pub fn from_env(storage: LocalStorage, max_bytes: u64) -> Result<Arc<Self>> {
         let url = required("GCP_WORKER_URL")?;
         let worker = Url::parse(&url).map_err(|_| AppError::invalid("Invalid GCP_WORKER_URL"))?;
-        if worker.scheme() != "https" || worker.host_str().is_none()
-            || worker.username() != "" || worker.password().is_some()
-            || worker.path() != "/" || worker.query().is_some() || worker.fragment().is_some()
+        if worker.scheme() != "https"
+            || worker.host_str().is_none()
+            || worker.username() != ""
+            || worker.password().is_some()
+            || worker.path() != "/"
+            || worker.query().is_some()
+            || worker.fragment().is_some()
         {
             return Err(AppError::invalid("GCP_WORKER_URL must be an HTTPS origin"));
         }
         let worker_token = required("GCP_WORKER_TOKEN")?;
         if worker_token.len() < 32 {
-            return Err(AppError::invalid("GCP_WORKER_TOKEN must be at least 32 characters"));
+            return Err(AppError::invalid(
+                "GCP_WORKER_TOKEN must be at least 32 characters",
+            ));
         }
         let account: ServiceAccount = serde_json::from_str(&required("GCP_SERVICE_ACCOUNT_JSON")?)
             .map_err(|_| AppError::invalid("Invalid GCP_SERVICE_ACCOUNT_JSON"))?;
         if account.client_email.is_empty() || !account.private_key.contains("BEGIN PRIVATE KEY") {
-            return Err(AppError::invalid("GCP service account credentials are invalid"));
+            return Err(AppError::invalid(
+                "GCP service account credentials are invalid",
+            ));
         }
-        let idle = env::var("GCP_IDLE_TIMEOUT_SECS").ok()
-            .and_then(|v| v.parse::<u64>().ok()).unwrap_or(300);
-        let start_timeout = env::var("GCP_START_TIMEOUT_SECS").ok()
-            .and_then(|v| v.parse::<u64>().ok()).unwrap_or(300);
+        let idle = env::var("GCP_IDLE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(300);
+        let start_timeout = env::var("GCP_START_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(300);
         if !(60..=3600).contains(&idle) || !(60..=900).contains(&start_timeout) {
             return Err(AppError::invalid("Invalid GCP idle or startup timeout"));
         }
-        let cloud = Client::builder().connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(45)).redirect(reqwest::redirect::Policy::none())
-            .build().map_err(|_| bad("Google API client unavailable"))?;
-        let worker_http = Client::builder().connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(1800)).redirect(reqwest::redirect::Policy::none())
-            .build().map_err(|_| bad("Worker HTTP client unavailable"))?;
+        let cloud = Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(45))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| bad("Google API client unavailable"))?;
+        let worker_http = Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(1800))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| bad("Worker HTTP client unavailable"))?;
         Ok(Arc::new(Self {
             settings: Settings {
                 project: label("GCP_PROJECT_ID")?,
@@ -190,8 +226,10 @@ impl Remote {
                 return Ok(token.clone());
             }
         }
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)
-            .map_err(|_| bad("System clock unavailable"))?.as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| bad("System clock unavailable"))?
+            .as_secs();
         let claims = json!({
             "iss": self.settings.client_email,
             "scope": "https://www.googleapis.com/auth/compute",
@@ -202,44 +240,79 @@ impl Remote {
         let head = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","typ":"JWT"}"#);
         let body = URL_SAFE_NO_PAD.encode(claims.to_string());
         let assertion = format!("{head}.{body}");
-        let pem = self.settings.private_key.lines()
+        let pem = self
+            .settings
+            .private_key
+            .lines()
             .filter(|line| !line.starts_with("-----"))
             .collect::<String>();
-        let der = STANDARD.decode(pem).map_err(|_| bad("Invalid service account key encoding"))?;
-        let key = RsaKeyPair::from_pkcs8(&der).map_err(|_| bad("Invalid service account private key"))?;
+        let der = STANDARD
+            .decode(pem)
+            .map_err(|_| bad("Invalid service account key encoding"))?;
+        let key =
+            RsaKeyPair::from_pkcs8(&der).map_err(|_| bad("Invalid service account private key"))?;
         let mut signature = vec![0; key.public().modulus_len()];
-        key.sign(&RSA_PKCS1_SHA256, &SystemRandom::new(), assertion.as_bytes(), &mut signature)
-            .map_err(|_| bad("Google API authentication signing failed"))?;
+        key.sign(
+            &RSA_PKCS1_SHA256,
+            &SystemRandom::new(),
+            assertion.as_bytes(),
+            &mut signature,
+        )
+        .map_err(|_| bad("Google API authentication signing failed"))?;
         let signed = format!("{assertion}.{}", URL_SAFE_NO_PAD.encode(signature));
-        let response = self.cloud.post("https://oauth2.googleapis.com/token")
-            .form(&[("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"), ("assertion", signed.as_str())])
-            .send().await.map_err(|_| bad("Google OAuth token request failed"))?;
+        let response = self
+            .cloud
+            .post("https://oauth2.googleapis.com/token")
+            .form(&[
+                ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+                ("assertion", signed.as_str()),
+            ])
+            .send()
+            .await
+            .map_err(|_| bad("Google OAuth token request failed"))?;
         if !response.status().is_success() {
             return Err(bad("Google OAuth rejected service account credentials"));
         }
-        let payload: TokenReply = response.json().await.map_err(|_| bad("Invalid Google OAuth reply"))?;
+        let payload: TokenReply = response
+            .json()
+            .await
+            .map_err(|_| bad("Invalid Google OAuth reply"))?;
         if payload.access_token.is_empty() || payload.expires_in <= 60 {
             return Err(bad("Google OAuth returned an unusable token"));
         }
-        *cache = Some((payload.access_token.clone(), Instant::now() + Duration::from_secs(payload.expires_in - 60)));
+        *cache = Some((
+            payload.access_token.clone(),
+            Instant::now() + Duration::from_secs(payload.expires_in - 60),
+        ));
         Ok(payload.access_token)
     }
 
     async fn vm_state(&self) -> Result<String> {
-        let response = self.cloud.get(self.vm_url(""))
+        let response = self
+            .cloud
+            .get(self.vm_url(""))
             .bearer_auth(self.google_token().await?)
-            .send().await.map_err(|_| bad("Cannot check VM state"))?;
+            .send()
+            .await
+            .map_err(|_| bad("Cannot check VM state"))?;
         if !response.status().is_success() {
             return Err(bad("Google Compute Engine instance lookup failed"));
         }
-        let instance: Instance = response.json().await.map_err(|_| bad("Invalid VM state response"))?;
+        let instance: Instance = response
+            .json()
+            .await
+            .map_err(|_| bad("Invalid VM state response"))?;
         Ok(instance.status)
     }
 
     async fn vm_action(&self, action: &'static str) -> Result<()> {
-        let response = self.cloud.post(self.vm_url(action))
+        let response = self
+            .cloud
+            .post(self.vm_url(action))
             .bearer_auth(self.google_token().await?)
-            .send().await.map_err(|_| bad("Compute Engine lifecycle request failed"))?;
+            .send()
+            .await
+            .map_err(|_| bad("Compute Engine lifecycle request failed"))?;
         if !response.status().is_success() {
             return Err(bad("Compute Engine rejected VM lifecycle request"));
         }
@@ -247,8 +320,13 @@ impl Remote {
     }
 
     fn worker_req(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
-        let url = self.settings.worker.join(path).expect("fixed internal API path");
-        self.worker.request(method, url)
+        let url = self
+            .settings
+            .worker
+            .join(path)
+            .expect("fixed internal API path");
+        self.worker
+            .request(method, url)
             .bearer_auth(&self.settings.worker_token)
             .header("CF-Access-Client-Id", &self.settings.access_id)
             .header("CF-Access-Client-Secret", &self.settings.access_secret)
@@ -267,7 +345,10 @@ impl Remote {
         let mut start_requested = false;
         loop {
             if Instant::now() >= deadline {
-                return Err(AppError::new(ErrorCode::Timeout, "GCP worker startup timed out"));
+                return Err(AppError::new(
+                    ErrorCode::Timeout,
+                    "GCP worker startup timed out",
+                ));
             }
             match self.vm_state().await?.as_str() {
                 "RUNNING" => {
@@ -280,7 +361,7 @@ impl Remote {
                         self.vm_action("/start").await?;
                         start_requested = true;
                     }
-                },
+                }
                 "STOPPING" | "STAGING" | "PROVISIONING" | "REPAIRING" => (),
                 _ => return Err(bad("GCP VM is in an unsupported state")),
             }
@@ -302,13 +383,21 @@ impl Remote {
     }
 
     async fn worker_busy(&self) -> Result<bool> {
-        let response = self.worker_req(Method::GET, "/api/v1/internal/activity").send().await
+        let response = self
+            .worker_req(Method::GET, "/api/v1/internal/activity")
+            .send()
+            .await
             .map_err(|_| bad("Cannot verify GCP worker is idle"))?;
         if response.status() != StatusCode::OK {
             return Err(bad("GCP worker activity check failed"));
         }
-        let activity: Value = response.json().await.map_err(|_| bad("Invalid GCP activity reply"))?;
-        activity.get("busy").and_then(Value::as_bool)
+        let activity: Value = response
+            .json()
+            .await
+            .map_err(|_| bad("Invalid GCP activity reply"))?;
+        activity
+            .get("busy")
+            .and_then(Value::as_bool)
             .ok_or_else(|| bad("GCP activity reply was incomplete"))
     }
 
@@ -320,8 +409,11 @@ impl Remote {
         if self.active.load(Ordering::SeqCst) != 0 {
             return Ok(());
         }
-        let idle = self.last_activity.lock()
-            .map_err(|_| bad("Idle tracking unavailable"))?.elapsed();
+        let idle = self
+            .last_activity
+            .lock()
+            .map_err(|_| bad("Idle tracking unavailable"))?
+            .elapsed();
         if idle < self.settings.idle {
             return Ok(());
         }
@@ -342,12 +434,18 @@ impl Remote {
 
     async fn worker_job(&self, id: Uuid) -> Result<WorkerJob> {
         let path = format!("/api/v1/downloads/{id}");
-        let response = self.worker_req(Method::GET, &path).send().await
+        let response = self
+            .worker_req(Method::GET, &path)
+            .send()
+            .await
             .map_err(|_| bad("Cannot fetch worker job state"))?;
         if !response.status().is_success() {
             return Err(bad("GCP job lookup failed"));
         }
-        response.json().await.map_err(|_| bad("Invalid GCP job status"))
+        response
+            .json()
+            .await
+            .map_err(|_| bad("Invalid GCP job status"))
     }
 
     async fn cancel_worker(&self, id: Uuid) {
@@ -355,7 +453,13 @@ impl Remote {
         let _ = self.worker_req(Method::DELETE, &path).send().await;
     }
 
-    async fn retrieve(&self, job: Uuid, remote: Uuid, output: &WorkerOutput, cancel: &CancellationToken) -> Result<StoredOutput> {
+    async fn retrieve(
+        &self,
+        job: Uuid,
+        remote: Uuid,
+        output: &WorkerOutput,
+        cancel: &CancellationToken,
+    ) -> Result<StoredOutput> {
         let ext = output.filename.rsplit('.').next().unwrap_or("");
         let mime = match ext {
             "mp4" => "video/mp4",
@@ -365,7 +469,10 @@ impl Remote {
             _ => return Err(bad("GCP produced an unsupported media file")),
         };
         if output.size_bytes == 0 || output.size_bytes >= self.settings.max_bytes {
-            return Err(AppError::new(ErrorCode::DownloadTooLarge, "Remote file exceeds size limit"));
+            return Err(AppError::new(
+                ErrorCode::DownloadTooLarge,
+                "Remote file exceeds size limit",
+            ));
         }
         let dir = self.storage.create_job(job).await?;
         let result = async {
@@ -412,13 +519,22 @@ impl Extractor for Remote {
     async fn video_info(&self, url: &str) -> Result<VideoInfo> {
         let _active = self.activity();
         self.ensure_ready().await?;
-        let response = self.worker_req(Method::POST, "/api/v1/videos/info")
-            .json(&json!({"url":url})).send().await
+        let response = self
+            .worker_req(Method::POST, "/api/v1/videos/info")
+            .json(&json!({"url":url}))
+            .send()
+            .await
             .map_err(|_| bad("GCP metadata request failed"))?;
         if !response.status().is_success() {
-            return Err(AppError::new(ErrorCode::AccessRestricted, "GCP could not retrieve YouTube metadata"));
+            return Err(AppError::new(
+                ErrorCode::AccessRestricted,
+                "GCP could not retrieve YouTube metadata",
+            ));
         }
-        response.json().await.map_err(|_| bad("Invalid GCP metadata response"))
+        response
+            .json()
+            .await
+            .map_err(|_| bad("Invalid GCP metadata response"))
     }
 }
 
@@ -441,11 +557,17 @@ impl JobExecutor for Remote {
         }
         let mut dispatched = None;
         for attempt in 0..2 {
-            match self.worker_req(Method::POST, "/api/v1/downloads")
+            match self
+                .worker_req(Method::POST, "/api/v1/downloads")
                 .header("X-Idempotency-Key", id.to_string())
                 .json(request)
-                .send().await {
-                Ok(response) => { dispatched = Some(response); break; }
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    dispatched = Some(response);
+                    break;
+                }
                 Err(_) if attempt == 0 => tokio::time::sleep(Duration::from_secs(2)).await,
                 Err(_) => return Err(bad("Cannot dispatch job to GCP")),
             }
@@ -457,7 +579,10 @@ impl JobExecutor for Remote {
         if !response.status().is_success() {
             return Err(bad("GCP refused download request"));
         }
-        let job: WorkerJob = response.json().await.map_err(|_| bad("Invalid GCP dispatch reply"))?;
+        let job: WorkerJob = response
+            .json()
+            .await
+            .map_err(|_| bad("Invalid GCP dispatch reply"))?;
         let remote = job.job_id;
         if remote != id {
             return Err(bad("GCP returned a different job identifier"));

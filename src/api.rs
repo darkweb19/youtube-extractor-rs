@@ -230,18 +230,26 @@ async fn health(State(state): State<ApiState>) -> Response {
             if url.scheme() != "socks5" || url.host_str() != Some("127.0.0.1") {
                 return Err(AppError::internal("Worker proxy must be local SOCKS5"));
             }
-            let port = url.port().ok_or_else(|| AppError::internal("Proxy port is missing"))?;
-            tokio::time::timeout(Duration::from_secs(2), tokio::net::TcpStream::connect(("127.0.0.1", port)))
-                .await
-                .map_err(|_| AppError::internal("WARP proxy is unavailable"))?
-                .map_err(|_| AppError::internal("WARP proxy is unavailable"))?;
+            let port = url
+                .port()
+                .ok_or_else(|| AppError::internal("Proxy port is missing"))?;
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                tokio::net::TcpStream::connect(("127.0.0.1", port)),
+            )
+            .await
+            .map_err(|_| AppError::internal("WARP proxy is unavailable"))?
+            .map_err(|_| AppError::internal("WARP proxy is unavailable"))?;
             let status = tokio::process::Command::new("warp-cli")
                 .arg("status")
                 .output()
                 .await
                 .map_err(|_| AppError::internal("WARP status is unavailable"))?;
             let status_text = String::from_utf8_lossy(&status.stdout);
-            if !status.status.success() || !status_text.contains("Connected") || status_text.contains("Disconnected") {
+            if !status.status.success()
+                || !status_text.contains("Connected")
+                || status_text.contains("Disconnected")
+            {
                 return Err(AppError::internal("WARP is not connected"));
             }
         }
@@ -300,7 +308,10 @@ async fn create_download(
     request.validate()?;
     crate::extractor::normalize_url(&request.url)?;
     let job = if let Some(header) = headers.get("X-Idempotency-Key") {
-        let id = header.to_str().ok().and_then(|v| Uuid::parse_str(v).ok())
+        let id = header
+            .to_str()
+            .ok()
+            .and_then(|v| Uuid::parse_str(v).ok())
             .ok_or_else(|| AppError::invalid("Invalid X-Idempotency-Key"))?;
         state.jobs.submit_with_id(request, Some(id)).await?
     } else {

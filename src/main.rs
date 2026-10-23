@@ -3,10 +3,10 @@ use tokio_util::sync::CancellationToken;
 use youtube_extractor::{
     api::{self, ApiState},
     config::Config,
-    jobs::{JobExecutor, JobManager, JobSettings},
     extractor::Extractor,
-    remote::Remote,
+    jobs::{JobExecutor, JobManager, JobSettings},
     media::Ffmpeg,
+    remote::Remote,
     storage::LocalStorage,
     ytdlp::YtDlp,
 };
@@ -32,34 +32,33 @@ async fn run() -> youtube_extractor::error::Result<()> {
         .unwrap_or_else(|| "ffprobe".into());
     let ffmpeg = Ffmpeg::new(config.ffmpeg_path.clone(), probe, config.download_timeout);
     let mode = std::env::var("EXTRACTOR_MODE").unwrap_or_else(|_| "local".into());
-    let (extractor, executor): (Arc<dyn Extractor>, Arc<dyn JobExecutor>) =
-        if mode == "remote" {
-            let remote = Remote::from_env(storage.clone(), config.max_download_bytes)?;
-            remote.start_idle_watch();
-            (remote.clone(), remote)
-        } else if mode == "local" {
-            if std::env::var("YTDLP_PROXY_REQUIRED").as_deref() == Ok("true")
-                && !std::env::var("YTDLP_PROXY").is_ok_and(|v| v.starts_with("socks5://127.0.0.1:"))
-            {
-                return Err(youtube_extractor::error::AppError::invalid(
-                    "GCP worker mode requires a local WARP SOCKS5 proxy",
-                ));
-            }
-            let local = Arc::new(YtDlp::new(
-                std::env::var_os("YTDLP_PATH")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| "yt-dlp".into()),
-                storage,
-                ffmpeg,
-                config.download_timeout,
-                config.max_download_bytes,
-            ));
-            (local.clone(), local)
-        } else {
+    let (extractor, executor): (Arc<dyn Extractor>, Arc<dyn JobExecutor>) = if mode == "remote" {
+        let remote = Remote::from_env(storage.clone(), config.max_download_bytes)?;
+        remote.start_idle_watch();
+        (remote.clone(), remote)
+    } else if mode == "local" {
+        if std::env::var("YTDLP_PROXY_REQUIRED").as_deref() == Ok("true")
+            && !std::env::var("YTDLP_PROXY").is_ok_and(|v| v.starts_with("socks5://127.0.0.1:"))
+        {
             return Err(youtube_extractor::error::AppError::invalid(
-                "EXTRACTOR_MODE must be local or remote",
+                "GCP worker mode requires a local WARP SOCKS5 proxy",
             ));
-        };
+        }
+        let local = Arc::new(YtDlp::new(
+            std::env::var_os("YTDLP_PATH")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| "yt-dlp".into()),
+            storage,
+            ffmpeg,
+            config.download_timeout,
+            config.max_download_bytes,
+        ));
+        (local.clone(), local)
+    } else {
+        return Err(youtube_extractor::error::AppError::invalid(
+            "EXTRACTOR_MODE must be local or remote",
+        ));
+    };
     let jobs = JobManager::new(
         JobSettings {
             data_dir: config.data_dir.clone(),

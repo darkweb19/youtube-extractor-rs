@@ -223,10 +223,12 @@ impl JobManager {
                 && record.request.is_some()
                 && record.expires_at > now();
             let requeued = if can_requeue {
-                self.sender.try_send(Work {
-                    id,
-                    request: record.request.clone().expect("checked"),
-                }).is_ok()
+                self.sender
+                    .try_send(Work {
+                        id,
+                        request: record.request.clone().expect("checked"),
+                    })
+                    .is_ok()
             } else {
                 false
             };
@@ -289,10 +291,15 @@ impl JobManager {
     }
     pub async fn has_activity(&self) -> bool {
         let entries = self.entries.lock().await;
-        entries.values().any(|e| e.in_flight || e.record.status.active()
-            || e.readers.load(Ordering::SeqCst) > 0)
+        entries.values().any(|e| {
+            e.in_flight || e.record.status.active() || e.readers.load(Ordering::SeqCst) > 0
+        })
     }
-    pub async fn submit_with_id(&self, request: DownloadRequest, supplied: Option<Uuid>) -> Result<JobRecord> {
+    pub async fn submit_with_id(
+        &self,
+        request: DownloadRequest,
+        supplied: Option<Uuid>,
+    ) -> Result<JobRecord> {
         request.validate()?;
         crate::extractor::normalize_url(&request.url)?;
         if self.stop.is_cancelled() {
@@ -304,7 +311,9 @@ impl JobManager {
         if let Some(id) = supplied {
             if let Some(record) = self.entries.lock().await.get(&id).map(|e| e.record.clone()) {
                 if record.request.as_ref() != Some(&request) {
-                    return Err(AppError::invalid("Idempotency key was used with another request"));
+                    return Err(AppError::invalid(
+                        "Idempotency key was used with another request",
+                    ));
                 }
                 return Ok(record);
             }
@@ -323,7 +332,9 @@ impl JobManager {
         if let Some(id) = supplied {
             if let Some(entry) = entries.get(&id) {
                 if entry.record.request.as_ref() != Some(&request) {
-                    return Err(AppError::invalid("Idempotency key was used with another request"));
+                    return Err(AppError::invalid(
+                        "Idempotency key was used with another request",
+                    ));
                 }
                 return Ok(entry.record.clone());
             }

@@ -183,10 +183,8 @@ impl YtDlp {
     ) -> Result<StoredOutput> {
         let dir = self.storage.create_job(id).await?;
         let result = self.download_job(request, id, &dir, cancel, progress).await;
-        if result.is_err() {
-            if self.storage.cleanup(id).await.is_err() {
-                tracing::warn!(job_id = %id, "Failed to clean up incomplete yt-dlp job");
-            }
+        if result.is_err() && self.storage.cleanup(id).await.is_err() {
+            tracing::warn!(job_id = %id, "Failed to clean up incomplete yt-dlp job");
         }
         result
     }

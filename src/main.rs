@@ -5,8 +5,8 @@ use youtube_extractor::{
     config::Config,
     jobs::{JobManager, JobSettings},
     media::Ffmpeg,
-    ytdlp::YtDlp,
     storage::LocalStorage,
+    ytdlp::YtDlp,
 };
 
 #[tokio::main]

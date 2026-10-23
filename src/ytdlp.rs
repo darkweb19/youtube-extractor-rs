@@ -1,20 +1,26 @@
 //! Managed yt-dlp adapter. Axum owns auth, job lifecycle, storage and file delivery.
 //! yt-dlp handles only public YouTube metadata, stream selection and media transfer.
-use std::{path::{Path, PathBuf}, process::Stdio, time::Duration};
-use async_trait::async_trait;
-use serde_json::Value;
-use tokio::{io::AsyncReadExt, process::Command, sync::watch};
-use tokio_util::sync::CancellationToken;
-use uuid::Uuid;
 use crate::{
     download::DownloadProgress,
     error::{AppError, ErrorCode, Result},
     extractor::{normalize_url, Extractor},
     jobs::JobExecutor,
     media::Ffmpeg,
-    model::{DownloadKind, DownloadRequest, MediaFormat, OutputFormat, Thumbnail, VideoId, VideoInfo},
+    model::{
+        DownloadKind, DownloadRequest, MediaFormat, OutputFormat, Thumbnail, VideoId, VideoInfo,
+    },
     storage::{LocalStorage, Storage, StoredOutput},
 };
+use async_trait::async_trait;
+use serde_json::Value;
+use std::{
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
+use tokio::{io::AsyncReadExt, process::Command, sync::watch};
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct YtDlp {
@@ -26,53 +32,90 @@ pub struct YtDlp {
 }
 
 impl YtDlp {
-    pub fn new(executable: PathBuf, storage: LocalStorage, ffmpeg: Ffmpeg, timeout: Duration, max_bytes: u64) -> Self {
-        Self { executable, storage, ffmpeg, timeout, max_bytes }
+    pub fn new(
+        executable: PathBuf,
+        storage: LocalStorage,
+        ffmpeg: Ffmpeg,
+        timeout: Duration,
+        max_bytes: u64,
+    ) -> Self {
+        Self {
+            executable,
+            storage,
+            ffmpeg,
+            timeout,
+            max_bytes,
+        }
     }
 
     fn command(&self) -> Command {
         let mut cmd = Command::new(&self.executable);
         cmd.args([
-            "--ignore-config", "--no-playlist", "--no-warnings", "--no-progress",
-            "--no-cache-dir", "--no-write-info-json", "--no-write-thumbnail",
-            "--no-write-subs", "--no-write-auto-subs",
-            "--js-runtimes", "node",
+            "--ignore-config",
+            "--no-playlist",
+            "--no-warnings",
+            "--no-progress",
+            "--no-cache-dir",
+            "--no-write-info-json",
+            "--no-write-thumbnail",
+            "--no-write-subs",
+            "--no-write-auto-subs",
+            "--js-runtimes",
+            "node",
         ]);
-        cmd.stdin(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true);
+        cmd.stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
         cmd
     }
 
     async fn info(&self, id: &VideoId) -> Result<VideoInfo> {
         let mut cmd = self.command();
         cmd.args(["--dump-single-json", "--skip-download"]);
-        cmd.arg("--").arg(format!("https://www.youtube.com/watch?v={id}"));
+        cmd.arg("--")
+            .arg(format!("https://www.youtube.com/watch?v={id}"));
         const MAX_METADATA_BYTES: usize = 8 * 1024 * 1024;
         cmd.stdout(Stdio::piped());
-        let mut child = cmd.spawn()
+        let mut child = cmd
+            .spawn()
             .map_err(|_| AppError::new(ErrorCode::Internal, "yt-dlp executable is unavailable"))?;
-        let stdout = child.stdout.take()
-            .ok_or_else(|| AppError::new(ErrorCode::Internal, "yt-dlp metadata pipe is unavailable"))?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            AppError::new(ErrorCode::Internal, "yt-dlp metadata pipe is unavailable")
+        })?;
         let read = async {
             let mut bytes = Vec::new();
-            stdout.take((MAX_METADATA_BYTES + 1) as u64)
-                .read_to_end(&mut bytes).await
+            stdout
+                .take((MAX_METADATA_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+                .await
                 .map_err(|_| AppError::new(ErrorCode::Network, "Failed to read yt-dlp metadata"))?;
             if bytes.len() > MAX_METADATA_BYTES {
-                return Err(AppError::new(ErrorCode::PlayerChanged,
-                    "yt-dlp metadata exceeded the response size limit"));
+                return Err(AppError::new(
+                    ErrorCode::PlayerChanged,
+                    "yt-dlp metadata exceeded the response size limit",
+                ));
             }
-            let status = child.wait().await
-                .map_err(|_| AppError::new(ErrorCode::DownloadInterrupted, "yt-dlp metadata worker failed"))?;
+            let status = child.wait().await.map_err(|_| {
+                AppError::new(
+                    ErrorCode::DownloadInterrupted,
+                    "yt-dlp metadata worker failed",
+                )
+            })?;
             if !status.success() {
-                return Err(AppError::new(ErrorCode::AccessRestricted,
-                    "yt-dlp could not retrieve metadata; the server may be restricted by YouTube"));
+                return Err(AppError::new(
+                    ErrorCode::AccessRestricted,
+                    "yt-dlp could not retrieve metadata; the server may be restricted by YouTube",
+                ));
             }
             Ok(bytes)
         };
         let outcome = tokio::time::timeout(self.timeout.min(Duration::from_secs(90)), read).await;
         let result = match outcome {
             Ok(result) => result,
-            Err(_) => Err(AppError::new(ErrorCode::Timeout, "YouTube metadata request timed out")),
+            Err(_) => Err(AppError::new(
+                ErrorCode::Timeout,
+                "YouTube metadata request timed out",
+            )),
         };
         if result.is_err() {
             let _ = child.kill().await;
@@ -90,9 +133,16 @@ impl YtDlp {
         cmd.arg("-o").arg(dir.join("source.%(ext)s"));
         let extension = match request.kind {
             DownloadKind::Video => {
-                let ext = if request.format == OutputFormat::Webm { "webm" } else { "mp4" };
+                let ext = if request.format == OutputFormat::Webm {
+                    "webm"
+                } else {
+                    "mp4"
+                };
                 let audio_ext = if ext == "webm" { "webm" } else { "m4a" };
-                let height = request.quality.as_deref().and_then(|q| q.strip_suffix('p'))
+                let height = request
+                    .quality
+                    .as_deref()
+                    .and_then(|q| q.strip_suffix('p'))
                     .and_then(|q| q.parse::<u32>().ok());
                 let selector = match (height, request.quality.as_deref()) {
                     (Some(height), _) => format!("bv[ext={ext}][height<={height}]+ba[ext={audio_ext}]/b[ext={ext}][height<={height}]"),
@@ -119,12 +169,16 @@ impl YtDlp {
         if !matches!(extension, "mp4" | "webm" | "mp3" | "m4a") {
             return Err(AppError::invalid("Invalid output format"));
         }
-        cmd.arg("--").arg(format!("https://www.youtube.com/watch?v={id}"));
+        cmd.arg("--")
+            .arg(format!("https://www.youtube.com/watch?v={id}"));
         Ok(cmd)
     }
 
     async fn run_job(
-        &self, request: &DownloadRequest, id: Uuid, cancel: &CancellationToken,
+        &self,
+        request: &DownloadRequest,
+        id: Uuid,
+        cancel: &CancellationToken,
         progress: &watch::Sender<DownloadProgress>,
     ) -> Result<StoredOutput> {
         let dir = self.storage.create_job(id).await?;
@@ -138,12 +192,17 @@ impl YtDlp {
     }
 
     async fn download_job(
-        &self, request: &DownloadRequest, id: Uuid, dir: &Path,
-        cancel: &CancellationToken, progress: &watch::Sender<DownloadProgress>,
+        &self,
+        request: &DownloadRequest,
+        id: Uuid,
+        dir: &Path,
+        cancel: &CancellationToken,
+        progress: &watch::Sender<DownloadProgress>,
     ) -> Result<StoredOutput> {
         let mut command = self.download_command(request, dir)?;
         command.stdout(Stdio::null());
-        let mut child = command.spawn()
+        let mut child = command
+            .spawn()
             .map_err(|_| AppError::new(ErrorCode::Internal, "yt-dlp executable is unavailable"))?;
         let mut quota_tick = tokio::time::interval(Duration::from_millis(250));
         let deadline = tokio::time::Instant::now() + self.timeout;
@@ -190,43 +249,70 @@ impl YtDlp {
             DownloadKind::Audio => "m4a",
         };
         let output = dir.join(format!("source.{ext}"));
-        let bytes = tokio::fs::metadata(&output).await
-            .map_err(|_| AppError::new(ErrorCode::UnsupportedFormat, "yt-dlp produced no supported output file"))?.len();
+        let bytes = tokio::fs::metadata(&output)
+            .await
+            .map_err(|_| {
+                AppError::new(
+                    ErrorCode::UnsupportedFormat,
+                    "yt-dlp produced no supported output file",
+                )
+            })?
+            .len();
         if bytes == 0 || bytes >= self.max_bytes || workspace_bytes(dir).await? >= self.max_bytes {
-            return Err(AppError::new(ErrorCode::DownloadTooLarge, "Output reached the storage limit"));
+            return Err(AppError::new(
+                ErrorCode::DownloadTooLarge,
+                "Output reached the storage limit",
+            ));
         }
         let _ = progress.send(DownloadProgress {
-            downloaded_bytes: bytes, total_bytes: Some(bytes), stage: "processing".into(),
+            downloaded_bytes: bytes,
+            total_bytes: Some(bytes),
+            stage: "processing".into(),
         });
         let probe = self.ffmpeg.probe(&output, cancel).await?;
         let has_audio = probe.streams.iter().any(|s| s.codec_type == "audio");
         let has_video = probe.streams.iter().any(|s| s.codec_type == "video");
-        if !has_audio || (request.kind == DownloadKind::Video && !has_video)
-            || (request.kind == DownloadKind::Audio && has_video) {
-            return Err(AppError::new(ErrorCode::FfmpegFailed, "Downloaded file has unexpected media streams"));
+        if !has_audio
+            || (request.kind == DownloadKind::Video && !has_video)
+            || (request.kind == DownloadKind::Audio && has_video)
+        {
+            return Err(AppError::new(
+                ErrorCode::FfmpegFailed,
+                "Downloaded file has unexpected media streams",
+            ));
         }
         if cancel.is_cancelled() {
             return Err(AppError::new(ErrorCode::Cancelled, "Download cancelled"));
         }
         let mime = match ext {
-            "mp4" => "video/mp4", "webm" => "video/webm",
-            "mp3" => "audio/mpeg", _ => "audio/mp4",
+            "mp4" => "video/mp4",
+            "webm" => "video/webm",
+            "mp3" => "audio/mpeg",
+            _ => "audio/mp4",
         };
         let stored = self.storage.publish(id, &output, ext, mime).await?;
         let _ = progress.send(DownloadProgress {
-            downloaded_bytes: bytes, total_bytes: Some(bytes), stage: "completed".into(),
+            downloaded_bytes: bytes,
+            total_bytes: Some(bytes),
+            stage: "completed".into(),
         });
         Ok(stored)
     }
 }
 
 async fn workspace_bytes(dir: &Path) -> Result<u64> {
-    let mut reader = tokio::fs::read_dir(dir).await
+    let mut reader = tokio::fs::read_dir(dir)
+        .await
         .map_err(|_| AppError::new(ErrorCode::Storage, "Cannot inspect download workspace"))?;
     let mut total = 0_u64;
-    while let Some(entry) = reader.next_entry().await
-        .map_err(|_| AppError::new(ErrorCode::Storage, "Cannot inspect download workspace"))? {
-        let metadata = entry.metadata().await
+    while let Some(entry) = reader
+        .next_entry()
+        .await
+        .map_err(|_| AppError::new(ErrorCode::Storage, "Cannot inspect download workspace"))?
+    {
+        let metadata = entry
+            .metadata()
+            .await
             .map_err(|_| AppError::new(ErrorCode::Storage, "Cannot inspect download workspace"))?;
         if metadata.is_file() {
             total = total.saturating_add(metadata.len());
@@ -239,24 +325,53 @@ fn parse_info(json: &[u8], expected: &VideoId) -> Result<VideoInfo> {
     let data: Value = serde_json::from_slice(json)
         .map_err(|_| AppError::new(ErrorCode::PlayerChanged, "Invalid yt-dlp metadata response"))?;
     if data.get("id").and_then(Value::as_str) != Some(expected.as_ref()) {
-        return Err(AppError::new(ErrorCode::PlayerChanged, "yt-dlp returned a different video"));
+        return Err(AppError::new(
+            ErrorCode::PlayerChanged,
+            "yt-dlp returned a different video",
+        ));
     }
-    let text = |key: &str| data.get(key).and_then(Value::as_str).unwrap_or("").to_owned();
+    let text = |key: &str| {
+        data.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned()
+    };
     let optional = |key: &str| data.get(key).and_then(Value::as_str).map(str::to_owned);
-    let formats = data.get("formats").and_then(Value::as_array)
-        .map(|list| list.iter().filter_map(parse_format).collect()).unwrap_or_default();
-    let thumbnails = data.get("thumbnails").and_then(Value::as_array)
-        .map(|list| list.iter().filter_map(|f| Some(Thumbnail {
-            url: f.get("url")?.as_str()?.to_owned(),
-            width: f.get("width").and_then(Value::as_u64).and_then(|n| n.try_into().ok()),
-            height: f.get("height").and_then(Value::as_u64).and_then(|n| n.try_into().ok()),
-        })).collect()).unwrap_or_default();
+    let formats = data
+        .get("formats")
+        .and_then(Value::as_array)
+        .map(|list| list.iter().filter_map(parse_format).collect())
+        .unwrap_or_default();
+    let thumbnails = data
+        .get("thumbnails")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(|f| {
+                    Some(Thumbnail {
+                        url: f.get("url")?.as_str()?.to_owned(),
+                        width: f
+                            .get("width")
+                            .and_then(Value::as_u64)
+                            .and_then(|n| n.try_into().ok()),
+                        height: f
+                            .get("height")
+                            .and_then(Value::as_u64)
+                            .and_then(|n| n.try_into().ok()),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(VideoInfo {
         id: expected.clone(),
         title: text("title"),
         description: text("description"),
-        duration_seconds: data.get("duration").and_then(Value::as_f64)
-            .filter(|n| n.is_finite() && *n >= 0.0).map(|n| n as u64),
+        duration_seconds: data
+            .get("duration")
+            .and_then(Value::as_f64)
+            .filter(|n| n.is_finite() && *n >= 0.0)
+            .map(|n| n as u64),
         channel_id: optional("channel_id"),
         channel_name: optional("channel"),
         thumbnails,
@@ -266,26 +381,52 @@ fn parse_info(json: &[u8], expected: &VideoId) -> Result<VideoInfo> {
 
 fn parse_format(f: &Value) -> Option<MediaFormat> {
     let ext = f.get("ext")?.as_str()?;
-    if !matches!(ext, "mp4" | "m4a" | "webm" | "mp3") { return None; }
+    if !matches!(ext, "mp4" | "m4a" | "webm" | "mp3") {
+        return None;
+    }
     let vcodec = f.get("vcodec").and_then(Value::as_str).unwrap_or("none");
     let acodec = f.get("acodec").and_then(Value::as_str).unwrap_or("none");
     let has_video = vcodec != "none";
     let has_audio = acodec != "none";
-    if !has_video && !has_audio { return None; }
-    let codecs = [vcodec, acodec].into_iter().filter(|c| *c != "none")
-        .map(str::to_owned).collect();
-    let itag = f.get("format_id").and_then(Value::as_str)
-        .and_then(|id| id.split('-').next()?.parse().ok()).unwrap_or(0);
+    if !has_video && !has_audio {
+        return None;
+    }
+    let codecs = [vcodec, acodec]
+        .into_iter()
+        .filter(|c| *c != "none")
+        .map(str::to_owned)
+        .collect();
+    let itag = f
+        .get("format_id")
+        .and_then(Value::as_str)
+        .and_then(|id| id.split('-').next()?.parse().ok())
+        .unwrap_or(0);
     Some(MediaFormat {
-        itag, mime_type: format!("{}/{}", if has_video { "video" } else { "audio" }, ext),
-        codecs, container: ext.to_owned(),
-        bitrate: f.get("tbr").and_then(Value::as_f64).map(|n| (n * 1000.0) as u64),
-        width: f.get("width").and_then(Value::as_u64).and_then(|n| n.try_into().ok()),
-        height: f.get("height").and_then(Value::as_u64).and_then(|n| n.try_into().ok()),
+        itag,
+        mime_type: format!("{}/{}", if has_video { "video" } else { "audio" }, ext),
+        codecs,
+        container: ext.to_owned(),
+        bitrate: f
+            .get("tbr")
+            .and_then(Value::as_f64)
+            .map(|n| (n * 1000.0) as u64),
+        width: f
+            .get("width")
+            .and_then(Value::as_u64)
+            .and_then(|n| n.try_into().ok()),
+        height: f
+            .get("height")
+            .and_then(Value::as_u64)
+            .and_then(|n| n.try_into().ok()),
         fps: f.get("fps").and_then(Value::as_f64).map(|n| n as u32),
-        content_length: f.get("filesize").or_else(|| f.get("filesize_approx"))
+        content_length: f
+            .get("filesize")
+            .or_else(|| f.get("filesize_approx"))
             .and_then(Value::as_u64),
-        has_audio, has_video, url: None, signature_cipher: None,
+        has_audio,
+        has_video,
+        url: None,
+        signature_cipher: None,
     })
 }
 
@@ -298,8 +439,13 @@ impl Extractor for YtDlp {
 
 #[async_trait]
 impl JobExecutor for YtDlp {
-    async fn run(&self, request: &DownloadRequest, id: Uuid,
-        cancel: CancellationToken, progress: watch::Sender<DownloadProgress>) -> Result<StoredOutput> {
+    async fn run(
+        &self,
+        request: &DownloadRequest,
+        id: Uuid,
+        cancel: CancellationToken,
+        progress: watch::Sender<DownloadProgress>,
+    ) -> Result<StoredOutput> {
         self.run_job(request, id, &cancel, &progress).await
     }
     async fn cleanup(&self, id: Uuid) -> Result<()> {
@@ -340,10 +486,18 @@ mod tests {
             audio_bitrate_kbps: None,
         };
         let command = worker.download_command(&request, temp.path()).unwrap();
-        let args: Vec<_> = command.as_std().get_args().map(|a| a.to_string_lossy()).collect();
-        assert!(args.iter().any(|arg| arg.contains("bv[ext=mp4][height<=720]+ba[ext=m4a]")));
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy())
+            .collect();
+        assert!(args
+            .iter()
+            .any(|arg| arg.contains("bv[ext=mp4][height<=720]+ba[ext=m4a]")));
         assert!(args.iter().any(|arg| arg == "--"));
-        assert!(args.iter().any(|arg| arg == "https://www.youtube.com/watch?v=SAFrydhpgJo"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "https://www.youtube.com/watch?v=SAFrydhpgJo"));
         assert!(!args.iter().any(|arg| arg.contains("youtu.be")));
     }
 
@@ -371,7 +525,9 @@ mod tests {
         tokio::fs::write(&program, script).await.unwrap();
         let mut permissions = tokio::fs::metadata(&program).await.unwrap().permissions();
         permissions.set_mode(0o700);
-        tokio::fs::set_permissions(&program, permissions).await.unwrap();
+        tokio::fs::set_permissions(&program, permissions)
+            .await
+            .unwrap();
         let storage = LocalStorage::new(temp.path().join("jobs")).await.unwrap();
         let worker = YtDlp::new(
             program,
@@ -400,10 +556,14 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
         let program = temp.path().join("mock-yt-dlp");
-        tokio::fs::write(&program, "#!/bin/sh\nexec sleep 30\n").await.unwrap();
+        tokio::fs::write(&program, "#!/bin/sh\nexec sleep 30\n")
+            .await
+            .unwrap();
         let mut permissions = tokio::fs::metadata(&program).await.unwrap().permissions();
         permissions.set_mode(0o700);
-        tokio::fs::set_permissions(&program, permissions).await.unwrap();
+        tokio::fs::set_permissions(&program, permissions)
+            .await
+            .unwrap();
         let storage = LocalStorage::new(temp.path().join("jobs")).await.unwrap();
         let worker = YtDlp::new(
             program,

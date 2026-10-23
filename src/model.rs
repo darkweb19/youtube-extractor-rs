@@ -118,7 +118,7 @@ pub enum OutputFormat {
     Webm,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DownloadRequest {
     pub url: String,

@@ -10,7 +10,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine as _};
-use reqwest::{header, Client, Method, StatusCode, Url};
+use reqwest::{Client, Method, StatusCode, Url};
 use ring::{rand::SystemRandom, signature::{KeyPair, RsaKeyPair, RSA_PKCS1_SHA256}};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -264,6 +264,7 @@ impl Remote {
     async fn ensure_ready(&self) -> Result<()> {
         let _lock = self.lifecycle.lock().await;
         let deadline = Instant::now() + self.settings.start_timeout;
+        let mut start_requested = false;
         loop {
             if Instant::now() >= deadline {
                 return Err(AppError::new(ErrorCode::Timeout, "GCP worker startup timed out"));
@@ -274,7 +275,12 @@ impl Remote {
                         return Ok(());
                     }
                 }
-                "TERMINATED" => self.vm_action("/start").await?,
+                "TERMINATED" => {
+                    if !start_requested {
+                        self.vm_action("/start").await?;
+                        start_requested = true;
+                    }
+                },
                 "STOPPING" | "STAGING" | "PROVISIONING" | "REPAIRING" => (),
                 _ => return Err(bad("GCP VM is in an unsupported state")),
             }
@@ -295,6 +301,17 @@ impl Remote {
         });
     }
 
+    async fn worker_busy(&self) -> Result<bool> {
+        let response = self.worker_req(Method::GET, "/api/v1/internal/activity").send().await
+            .map_err(|_| bad("Cannot verify GCP worker is idle"))?;
+        if response.status() != StatusCode::OK {
+            return Err(bad("GCP worker activity check failed"));
+        }
+        let activity: Value = response.json().await.map_err(|_| bad("Invalid GCP activity reply"))?;
+        activity.get("busy").and_then(Value::as_bool)
+            .ok_or_else(|| bad("GCP activity reply was incomplete"))
+    }
+
     async fn stop_if_idle(&self) -> Result<()> {
         if self.active.load(Ordering::SeqCst) != 0 {
             return Ok(());
@@ -309,6 +326,13 @@ impl Remote {
             return Ok(());
         }
         if self.vm_state().await? == "RUNNING" {
+            // Never stop untracked work after a Railway restart or lost callback.
+            if self.worker_busy().await? {
+                if let Ok(mut last) = self.last_activity.lock() {
+                    *last = Instant::now();
+                }
+                return Ok(());
+            }
             // The lifecycle mutex blocks new dispatch until the stop request is accepted.
             self.vm_action("/stop").await?;
             tracing::info!("Stopped idle GCP extractor instance");
@@ -415,8 +439,18 @@ impl JobExecutor for Remote {
         if cancel.is_cancelled() {
             return Err(AppError::new(ErrorCode::Cancelled, "Job cancelled"));
         }
-        let response = self.worker_req(Method::POST, "/api/v1/downloads")
-            .json(request).send().await.map_err(|_| bad("Cannot dispatch job to GCP"))?;
+        let mut dispatched = None;
+        for attempt in 0..2 {
+            match self.worker_req(Method::POST, "/api/v1/downloads")
+                .header("X-Idempotency-Key", id.to_string())
+                .json(request)
+                .send().await {
+                Ok(response) => { dispatched = Some(response); break; }
+                Err(_) if attempt == 0 => tokio::time::sleep(Duration::from_secs(2)).await,
+                Err(_) => return Err(bad("Cannot dispatch job to GCP")),
+            }
+        }
+        let response = dispatched.ok_or_else(|| bad("GCP dispatch unavailable"))?;
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
             return Err(AppError::new(ErrorCode::QueueFull, "GCP queue is full"));
         }
@@ -425,6 +459,9 @@ impl JobExecutor for Remote {
         }
         let job: WorkerJob = response.json().await.map_err(|_| bad("Invalid GCP dispatch reply"))?;
         let remote = job.job_id;
+        if remote != id {
+            return Err(bad("GCP returned a different job identifier"));
+        }
         let result = async {
             loop {
                 let view = tokio::select! {

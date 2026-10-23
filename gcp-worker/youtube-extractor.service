@@ -9,7 +9,6 @@ Type=simple
 User=extractor
 Group=extractor
 EnvironmentFile=/etc/youtube-extractor.env
-ExecStartPre=/usr/bin/test -S /run/warp-svc.sock
 ExecStart=/usr/local/bin/youtube-extractor
 Restart=on-failure
 RestartSec=5

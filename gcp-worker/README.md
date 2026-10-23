@@ -7,7 +7,7 @@ job queue, cancellation, or file streaming code. GCP receives only the generated
 
 ## Build and copy only this folder
 
-On a Rust 1.99+ workstation or CI builder at the repository root:
+On a Docker-capable workstation (builds a Linux/amd64 Rust 1.99 binary):
 
 ```bash
 bash gcp-worker/package.sh

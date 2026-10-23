@@ -9,7 +9,7 @@ use crate::{
 use axum::{
     body::Body,
     extract::{rejection::JsonRejection, DefaultBodyLimit, Path, Request, State},
-    http::{header, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -58,6 +58,7 @@ pub fn router(state: ApiState) -> Router {
     let protected = Router::new()
         .route("/api/v1/videos/info", post(video_info))
         .route("/api/v1/downloads", post(create_download))
+        .route("/api/v1/internal/activity", get(worker_activity))
         .route(
             "/api/v1/downloads/{id}",
             get(get_download).delete(delete_download),
@@ -286,14 +287,25 @@ async fn video_info(
     }
     Ok(Json(state.extractor.video_info(&body.url).await?))
 }
+async fn worker_activity(State(state): State<ApiState>) -> Json<serde_json::Value> {
+    let active = state.jobs.has_activity().await;
+    Json(serde_json::json!({"busy": active}))
+}
 async fn create_download(
     State(state): State<ApiState>,
+    headers: HeaderMap,
     body: std::result::Result<Json<DownloadRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<JobView>)> {
     let Json(request) = body.map_err(json_error)?;
     request.validate()?;
     crate::extractor::normalize_url(&request.url)?;
-    let job = state.jobs.submit(request).await?;
+    let job = if let Some(header) = headers.get("X-Idempotency-Key") {
+        let id = header.to_str().ok().and_then(|v| Uuid::parse_str(v).ok())
+            .ok_or_else(|| AppError::invalid("Invalid X-Idempotency-Key"))?;
+        state.jobs.submit_with_id(request, Some(id)).await?
+    } else {
+        state.jobs.submit(request).await?
+    };
     Ok((StatusCode::ACCEPTED, Json(view(job))))
 }
 fn parse_id(id: &str) -> Result<Uuid> {

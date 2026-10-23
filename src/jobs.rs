@@ -285,6 +285,14 @@ impl JobManager {
         Ok(())
     }
     pub async fn submit(&self, request: DownloadRequest) -> Result<JobRecord> {
+        self.submit_with_id(request, None).await
+    }
+    pub async fn has_activity(&self) -> bool {
+        let entries = self.entries.lock().await;
+        entries.values().any(|e| e.in_flight || e.record.status.active()
+            || e.readers.load(Ordering::SeqCst) > 0)
+    }
+    pub async fn submit_with_id(&self, request: DownloadRequest, supplied: Option<Uuid>) -> Result<JobRecord> {
         request.validate()?;
         crate::extractor::normalize_url(&request.url)?;
         if self.stop.is_cancelled() {
@@ -292,6 +300,14 @@ impl JobManager {
                 ErrorCode::QueueFull,
                 "Service is shutting down",
             ));
+        }
+        if let Some(id) = supplied {
+            if let Some(record) = self.entries.lock().await.get(&id).map(|e| e.record.clone()) {
+                if record.request.as_ref() != Some(&request) {
+                    return Err(AppError::invalid("Idempotency key was used with another request"));
+                }
+                return Ok(record);
+            }
         }
         let permit = self
             .sender
@@ -303,6 +319,14 @@ impl JobManager {
                 ErrorCode::QueueFull,
                 "Service is shutting down",
             ));
+        }
+        if let Some(id) = supplied {
+            if let Some(entry) = entries.get(&id) {
+                if entry.record.request.as_ref() != Some(&request) {
+                    return Err(AppError::invalid("Idempotency key was used with another request"));
+                }
+                return Ok(entry.record.clone());
+            }
         }
         if entries.len() >= self.settings.max_jobs {
             return Err(AppError::new(
@@ -332,7 +356,7 @@ impl JobManager {
                 "Storage capacity is reserved by existing jobs",
             ));
         }
-        let id = Uuid::new_v4();
+        let id = supplied.unwrap_or_else(Uuid::new_v4);
         let record = JobRecord {
             job_id: id,
             status: JobStatus::Queued,
@@ -766,6 +790,7 @@ mod tests {
             updated_at: now(),
             expires_at: now() + 60,
             cleanup_pending: false,
+            request: None,
         };
         manager.persist(&interrupted).await.unwrap();
         manager.shutdown().await;

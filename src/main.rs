@@ -3,11 +3,9 @@ use tokio_util::sync::CancellationToken;
 use youtube_extractor::{
     api::{self, ApiState},
     config::Config,
-    download::DownloadPipeline,
     jobs::{JobManager, JobSettings},
     media::Ffmpeg,
-    network::SafeHttpClient,
-    rusty_extractor::RustyYtdlExtractor,
+    ytdlp::YtDlp,
     storage::LocalStorage,
 };
 
@@ -31,15 +29,14 @@ async fn run() -> youtube_extractor::error::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| "ffprobe".into());
     let ffmpeg = Ffmpeg::new(config.ffmpeg_path.clone(), probe, config.download_timeout);
-    let extractor = Arc::new(RustyYtdlExtractor);
-    let http = SafeHttpClient::new(config.connect_timeout, config.request_timeout)?;
-    let pipeline = Arc::new(DownloadPipeline::new(
-        extractor.clone(),
-        http,
+    let ytdlp = Arc::new(YtDlp::new(
+        std::env::var_os("YTDLP_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| "yt-dlp".into()),
         storage,
         ffmpeg,
+        config.download_timeout,
         config.max_download_bytes,
-        2,
     ));
     let jobs = JobManager::new(
         JobSettings {
@@ -52,10 +49,10 @@ async fn run() -> youtube_extractor::error::Result<()> {
             ttl: config.job_ttl,
             timeout: config.download_timeout,
         },
-        pipeline.clone(),
+        ytdlp.clone(),
     )
     .await?;
-    let app = api::router(ApiState::new(config.clone(), extractor, jobs.clone()));
+    let app = api::router(ApiState::new(config.clone(), ytdlp, jobs.clone()));
     let listener = tokio::net::TcpListener::bind(config.bind_addr)
         .await
         .map_err(|_| {

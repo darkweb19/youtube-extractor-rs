@@ -36,7 +36,7 @@ impl YtDlp {
             "--ignore-config", "--no-playlist", "--no-warnings", "--no-progress",
             "--no-cache-dir", "--no-write-info-json", "--no-write-thumbnail",
             "--no-write-subs", "--no-write-auto-subs",
-            "--remote-components", "ejs:npm",
+            "--js-runtimes", "node",
         ]);
         cmd.stdin(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true);
         cmd
@@ -387,7 +387,8 @@ mod tests {
         assert_eq!(info.title, "../../unsafe title");
         let args = tokio::fs::read_to_string(invoked).await.unwrap();
         assert!(args.contains("--ignore-config"));
-        assert!(args.contains("--remote-components"));
+        assert!(args.contains("--js-runtimes"));
+        assert!(args.contains("node"));
         assert!(args.contains("https://www.youtube.com/watch?v=SAFrydhpgJo"));
         assert!(!args.contains("youtu.be"));
         assert!(!args.contains("anything"));

@@ -1,0 +1,45 @@
+name: GCP Worker - Prebuilt ZIP
+on:
+  push:
+    branches: [fix/rust-yt-bot]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gcp-bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile Linux amd64 worker
+        run: cargo build --locked --release --bin youtube-extractor
+      - name: Assemble GCP-only bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p gcp-worker/bundle
+          install -m 0755 target/release/youtube-extractor gcp-worker/bundle/youtube-extractor
+          install -m 0755 gcp-worker/setup-ubuntu.sh gcp-worker/bundle/setup-ubuntu.sh
+          install -m 0755 gcp-worker/install-service.sh gcp-worker/bundle/install-service.sh
+          install -m 0644 gcp-worker/youtube-extractor.service gcp-worker/bundle/youtube-extractor.service
+          install -m 0644 gcp-worker/worker.env.example gcp-worker/bundle/worker.env.example
+          (cd gcp-worker/bundle && sha256sum youtube-extractor > SHA256SUMS)
+          file gcp-worker/bundle/youtube-extractor
+          bash -n gcp-worker/bundle/setup-ubuntu.sh gcp-worker/bundle/install-service.sh
+      - name: Publish prebuilt worker ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: gcp-worker-ubuntu24-amd64
+          path: gcp-worker/bundle/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 6

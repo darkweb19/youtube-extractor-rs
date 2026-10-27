@@ -21,6 +21,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Verify frontend JavaScript
         run: node --check web/app.js
+      - name: Frontend regression tests
+        run: node --test tests/frontend/*.test.mjs
       - name: Verify Rust formatting
         run: cargo fmt --all -- --check
       - name: Clippy

@@ -114,6 +114,48 @@ curl -fsS http://127.0.0.1:8080/health
 WARP behavior can change, and the network path is not guaranteed to stay usable
 for all videos. Download only media you are permitted to retrieve.
 
+### Controller lifecycle failures
+
+The old `VM controller rejected lifecycle request` message proves that a
+controller `POST /start` or `POST /stop` returned a status other than `200`,
+`202` or `409`. During download startup, `/start` is the likely operation.
+That message alone cannot establish why it failed. Updated job errors include
+the controller method/path and status, for example `VM controller POST /start
+returned HTTP 403`, followed by a fixed troubleshooting hint.
+
+| Controller HTTP status | Check |
+| --- | --- |
+| `401` | Railway's `GCP_CONTROLLER_TOKEN` matches the controller secret |
+| `403` | Cloud Run invocation policy and controller token validation; if the request reaches the application, its attached runtime identity's VM permissions |
+| `404` | Controller HTTPS origin/routes and its configured VM project, zone and instance |
+| `405` | Controller implements the required HTTP method for that route |
+| `3xx` | Redirects are intentionally blocked; configure the final HTTPS controller origin directly |
+| `429` | Controller rate limits or upstream quota; retry after the limit clears |
+| `5xx` | Cloud Run service logs, runtime identity/IAM and VM target configuration |
+
+Redeploy Railway from the pushed `fix/rust-yt-bot` commit before collecting the
+new diagnostics. In browser DevTools **Console**, enable **Preserve log**,
+filter for `[Frame]`, include the **Verbose** level for debug polling, and
+reproduce once. A poll may return HTTP `200` while its JSON job status is
+`failed`; inspect the displayed job error for the separate upstream controller
+status.
+
+Use the safe `job_id` to correlate browser events with Railway JSON logs from
+`youtube_extractor::remote`. The `remote_job` span contains `job_id`; controller
+events record `operation`, `method`, `path`, `http_status` and `elapsed_ms`.
+Transport failures instead report a safe `error_category`. `RUST_LOG=info`
+shows lifecycle stages. Set `RUST_LOG=info,youtube_extractor::remote=debug` if
+idle-skip reasons are also needed. Metadata operations use the
+`remote_metadata` span.
+
+Match the method, path, status and time with **Cloud Run request logs**, then
+inspect the controller's **service logs** to distinguish an invocation-policy
+rejection from controller token validation or VM IAM failure. If `GET /status`
+works but `POST /start` fails, inspect POST route handling and VM start
+permissions first; Cloud Run IAM generally gates every request, but that
+observation alone is not conclusive. Never log or paste tokens, raw headers,
+controller response bodies or video URLs when collecting diagnostics.
+
 ## Railway controller configuration
 
 Provision a separate Google Cloud Run VM controller implementing the contract

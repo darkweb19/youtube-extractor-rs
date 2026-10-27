@@ -212,6 +212,8 @@ The storage budget can reject admission before the queue fills. A remux usually 
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
+node --check web/app.js
+node --test tests/frontend/*.test.mjs
 ```
 
 Deterministic tests use controlled fixtures and test media rather than external YouTube access. To check the container:
@@ -276,3 +278,23 @@ old service-account key after confirming the controller works. Do not enable
 remote mode until the controller, worker, WARP, Cloudflare Tunnel/Access and
 IAM are configured. See the worker guide for the full configuration and
 controller authentication requirements.
+
+### Diagnose a controller lifecycle failure
+
+The old `VM controller rejected lifecycle request` message means a controller
+`POST /start` or `POST /stop` returned a status outside `200`, `202` and `409`.
+During a failed download this is likely `/start`; the message alone does not
+identify the status or cause. Updated errors include the method, path, HTTP
+status and a safe troubleshooting hint, including failures returned inside an
+otherwise successful job-status poll.
+
+Redeploy Railway from the pushed `fix/rust-yt-bot` commit, open browser DevTools
+**Console**, enable **Preserve log**, filter for `[Frame]`, and reproduce once.
+Enable the Console's **Verbose** level to see debug polling messages. Correlate
+the safe `job_id` with Railway logs from `youtube_extractor::remote`: controller
+events include `operation`, `method`, `path`, `http_status` and `elapsed_ms`,
+and the `remote_job` span carries `job_id`. `RUST_LOG=info` shows lifecycle
+stages; `RUST_LOG=info,youtube_extractor::remote=debug` also shows idle-skip
+reasons. See the [controller troubleshooting table](gcp-worker/README.md#controller-lifecycle-failures)
+for status-specific checks. Share only these safe diagnostics; never paste
+tokens, raw request headers/bodies or video URLs into logs or reports.

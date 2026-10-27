@@ -83,6 +83,62 @@ fn controller_client() -> reqwest::ClientBuilder {
 const MAX_CONTROLLER_STATUS_BYTES: usize = 16 * 1024;
 const LIFECYCLE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
+#[derive(Debug, Clone, Copy)]
+enum ControllerOperation {
+    Status,
+    Start,
+    Stop,
+}
+impl ControllerOperation {
+    fn details(self) -> (&'static str, Method, &'static str) {
+        match self {
+            Self::Status => ("status", Method::GET, "/status"),
+            Self::Start => ("start", Method::POST, "/start"),
+            Self::Stop => ("stop", Method::POST, "/stop"),
+        }
+    }
+}
+
+fn transport_category(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_body() || error.is_decode() {
+        "body"
+    } else {
+        "other"
+    }
+}
+
+fn controller_rejection(
+    operation: ControllerOperation,
+    status: StatusCode,
+    elapsed: Duration,
+) -> AppError {
+    let (operation, method, path) = operation.details();
+    let hint = match status.as_u16() {
+        401 => "Check GCP_CONTROLLER_TOKEN matches the controller secret.",
+        403 => "Check the controller token and Cloud Run invocation permissions; inspect controller VM runtime IAM and logs if the request reached the controller.",
+        404 => "Check GCP_CONTROLLER_URL, controller routes, and the controller VM project/zone/instance target.",
+        405 => "Check the controller route and HTTP method contract.",
+        429 => "Check controller request limits and retry after rate limiting clears.",
+        300..=399 => "Unexpected redirect; configure the controller HTTPS origin directly.",
+        500..=599 => "Inspect Cloud Run controller logs, runtime IAM permissions, and VM target configuration.",
+        200..=299 => "Unexpected success status; verify the controller HTTP response contract.",
+        _ => "Inspect Cloud Run controller logs and verify its HTTP API contract.",
+    };
+    tracing::warn!(event = "controller_request_rejected", operation, method = %method,
+        path, http_status = status.as_u16(), elapsed_ms = elapsed.as_millis() as u64, "VM controller rejected request");
+    AppError::new(
+        ErrorCode::Network,
+        format!(
+            "VM controller {method} {path} returned HTTP {}. {hint}",
+            status.as_u16()
+        ),
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LifecycleReply {
     Accepted,
@@ -212,46 +268,84 @@ impl Remote {
         Activity(self)
     }
 
-    fn controller_req(&self, method: Method, path: &'static str) -> reqwest::RequestBuilder {
+    async fn controller_request(
+        &self,
+        operation: ControllerOperation,
+    ) -> Result<reqwest::Response> {
+        let (operation, method, path) = operation.details();
+        let started = Instant::now();
+        tracing::info!(event = "controller_request_started", operation, method = %method,
+            path, "Sending VM controller request");
         let url = self
             .settings
             .controller
             .join(path)
             .expect("fixed controller API path");
-        self.controller
-            .request(method, url)
+        let response = self.controller.request(method.clone(), url)
             .header("X-Controller-Token", self.settings.controller_token.clone())
+            .send().await.map_err(|error| {
+                tracing::warn!(event = "controller_transport_failed", operation, method = %method,
+                    path, elapsed_ms = started.elapsed().as_millis() as u64,
+                    error_category = transport_category(&error), "VM controller transport failed");
+                AppError::new(ErrorCode::Network,
+                    format!("VM controller {method} {path} unavailable ({}). Check controller reachability and Cloud Run logs.", transport_category(&error)))
+            })?;
+        tracing::info!(event = "controller_response_received", operation, method = %method,
+            path, http_status = response.status().as_u16(),
+            elapsed_ms = started.elapsed().as_millis() as u64, "Received VM controller response");
+        Ok(response)
     }
 
     async fn vm_state(&self) -> Result<String> {
-        let mut response = self
-            .controller_req(Method::GET, "/status")
-            .send()
-            .await
-            .map_err(|_| bad("Cannot reach VM controller for status"))?;
+        let started = Instant::now();
+        let mut response = self.controller_request(ControllerOperation::Status).await?;
         if response.status() != StatusCode::OK {
-            return Err(bad("VM controller status request failed"));
+            return Err(controller_rejection(
+                ControllerOperation::Status,
+                response.status(),
+                started.elapsed(),
+            ));
         }
         // Status is tiny; cap both declared and streamed bodies before parsing.
         if response
             .content_length()
             .is_some_and(|n| n > MAX_CONTROLLER_STATUS_BYTES as u64)
         {
-            return Err(bad("VM controller status response is too large"));
+            tracing::warn!(
+                event = "controller_status_invalid",
+                reason = "oversized_body",
+                "VM controller status response rejected"
+            );
+            return Err(bad("VM controller GET /status response is too large"));
         }
         let mut body = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| bad("Cannot read VM controller status"))?
-        {
+        while let Some(chunk) = response.chunk().await.map_err(|error| {
+            tracing::warn!(
+                event = "controller_status_invalid",
+                reason = "body_unavailable",
+                error_category = transport_category(&error),
+                "Cannot read VM controller status"
+            );
+            bad("Cannot read VM controller GET /status response")
+        })? {
             if chunk.len() > MAX_CONTROLLER_STATUS_BYTES.saturating_sub(body.len()) {
-                return Err(bad("VM controller status response is too large"));
+                tracing::warn!(
+                    event = "controller_status_invalid",
+                    reason = "oversized_body",
+                    "VM controller status response rejected"
+                );
+                return Err(bad("VM controller GET /status response is too large"));
             }
             body.extend_from_slice(&chunk);
         }
-        let instance: Instance = serde_json::from_slice(&body)
-            .map_err(|_| bad("Invalid VM controller status response"))?;
+        let instance: Instance = serde_json::from_slice(&body).map_err(|_| {
+            tracing::warn!(
+                event = "controller_status_invalid",
+                reason = "malformed_json",
+                "VM controller status response rejected"
+            );
+            bad("Invalid VM controller GET /status JSON response")
+        })?;
         if !matches!(
             instance.status.as_str(),
             "PROVISIONING"
@@ -263,21 +357,44 @@ impl Remote {
                 | "REPAIRING"
                 | "TERMINATED"
         ) {
-            return Err(bad("VM controller returned an unknown VM state"));
+            tracing::warn!(
+                event = "controller_status_invalid",
+                reason = "unknown_state",
+                "VM controller status response rejected"
+            );
+            return Err(bad(
+                "VM controller GET /status returned an unknown VM state",
+            ));
         }
+        tracing::info!(event = "vm_state_observed", vm_state = %instance.status,
+            "Observed VM state");
         Ok(instance.status)
     }
 
-    async fn vm_action(&self, action: &'static str) -> Result<LifecycleReply> {
-        let response = self
-            .controller_req(Method::POST, action)
-            .send()
-            .await
-            .map_err(|_| bad("Cannot reach VM controller for lifecycle request"))?;
+    async fn vm_action(&self, action: ControllerOperation) -> Result<LifecycleReply> {
+        let started = Instant::now();
+        let response = self.controller_request(action).await?;
+        let (operation, _, _) = action.details();
         match response.status() {
-            StatusCode::OK | StatusCode::ACCEPTED => Ok(LifecycleReply::Accepted),
-            StatusCode::CONFLICT => Ok(LifecycleReply::Transient),
-            _ => Err(bad("VM controller rejected lifecycle request")),
+            StatusCode::OK | StatusCode::ACCEPTED => {
+                tracing::info!(
+                    event = "vm_lifecycle_accepted",
+                    operation,
+                    http_status = response.status().as_u16(),
+                    "VM lifecycle request accepted"
+                );
+                Ok(LifecycleReply::Accepted)
+            }
+            StatusCode::CONFLICT => {
+                tracing::info!(
+                    event = "vm_lifecycle_conflict",
+                    operation,
+                    http_status = 409,
+                    "VM lifecycle transient conflict; readiness polling or idle watcher will retry"
+                );
+                Ok(LifecycleReply::Transient)
+            }
+            status => Err(controller_rejection(action, status, started.elapsed())),
         }
     }
 
@@ -295,18 +412,76 @@ impl Remote {
     }
 
     async fn worker_ready(&self) -> bool {
-        matches!(
-            tokio::time::timeout(Duration::from_secs(7), self.worker_req(Method::GET, "/health").send()).await,
-            Ok(Ok(response)) if response.status() == StatusCode::OK
+        let started = Instant::now();
+        tracing::info!(
+            event = "worker_health_started",
+            "Checking authenticated worker health"
+        );
+        match tokio::time::timeout(
+            Duration::from_secs(7),
+            self.worker_req(Method::GET, "/health").send(),
         )
+        .await
+        {
+            Ok(Ok(response)) => {
+                let ready = response.status() == StatusCode::OK;
+                tracing::info!(
+                    event = "worker_health_checked",
+                    ready,
+                    http_status = response.status().as_u16(),
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "Worker health check finished"
+                );
+                ready
+            }
+            Ok(Err(error)) => {
+                tracing::info!(
+                    event = "worker_health_waiting",
+                    error_category = transport_category(&error),
+                    "Worker health unavailable; waiting for readiness"
+                );
+                false
+            }
+            Err(_) => {
+                tracing::info!(
+                    event = "worker_health_waiting",
+                    error_category = "timeout",
+                    "Worker health timed out; waiting for readiness"
+                );
+                false
+            }
+        }
     }
 
     async fn ensure_ready(&self) -> Result<()> {
+        let started = Instant::now();
+        tracing::info!(
+            event = "vm_lifecycle_lock_waiting",
+            "Waiting for VM lifecycle lock"
+        );
         let _lock = self.lifecycle.lock().await;
+        tracing::info!(
+            event = "vm_lifecycle_lock_acquired",
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "Acquired VM lifecycle lock"
+        );
         // Bound the entire polling operation, including in-flight HTTP calls.
-        tokio::time::timeout(self.settings.start_timeout, self.poll_until_ready())
+        let result = tokio::time::timeout(self.settings.start_timeout, self.poll_until_ready())
             .await
-            .map_err(|_| AppError::new(ErrorCode::Timeout, "GCP worker startup timed out"))?
+            .map_err(|_| {
+                tracing::warn!(
+                    event = "worker_startup_timeout",
+                    timeout_secs = self.settings.start_timeout.as_secs(),
+                    "GCP worker startup timed out"
+                );
+                AppError::new(ErrorCode::Timeout, "GCP worker startup timed out")
+            })?;
+        match &result {
+            Ok(()) => tracing::info!(event = "worker_ready", "GCP worker is ready for dispatch"),
+            Err(error) => tracing::warn!(event = "worker_startup_failed", error_code = ?error.code,
+                "GCP worker readiness failed"),
+        }
+        result
     }
 
     async fn poll_until_ready(&self) -> Result<()> {
@@ -321,12 +496,18 @@ impl Remote {
                 "TERMINATED" => {
                     if !start_requested {
                         // A 409 is a lifecycle race: poll status and retry when stopped.
-                        start_requested =
-                            self.vm_action("/start").await? == LifecycleReply::Accepted;
+                        start_requested = self.vm_action(ControllerOperation::Start).await?
+                            == LifecycleReply::Accepted;
                     }
                 }
                 "STOPPING" | "STAGING" | "PROVISIONING" | "REPAIRING" => (),
-                _ => return Err(bad("GCP VM is in an unsupported state")),
+                _ => {
+                    tracing::warn!(
+                        event = "worker_startup_unsupported_state",
+                        "VM state cannot serve worker jobs"
+                    );
+                    return Err(bad("GCP VM is in an unsupported state"));
+                }
             }
             tokio::time::sleep(LIFECYCLE_POLL_INTERVAL).await;
         }
@@ -350,26 +531,59 @@ impl Remote {
             .worker_req(Method::GET, "/api/v1/internal/activity")
             .send()
             .await
-            .map_err(|_| bad("Cannot verify GCP worker is idle"))?;
+            .map_err(|error| {
+                tracing::warn!(
+                    event = "worker_activity_failed",
+                    error_category = transport_category(&error),
+                    "Cannot verify worker is idle"
+                );
+                bad("Cannot verify GCP worker is idle")
+            })?;
         if response.status() != StatusCode::OK {
+            tracing::warn!(
+                event = "worker_activity_failed",
+                http_status = response.status().as_u16(),
+                "Worker activity HTTP request failed; idle shutdown blocked"
+            );
             return Err(bad("GCP worker activity check failed"));
         }
-        let activity: Value = response
-            .json()
-            .await
-            .map_err(|_| bad("Invalid GCP activity reply"))?;
+        let activity: Value = response.json().await.map_err(|_| {
+            tracing::warn!(
+                event = "worker_activity_invalid",
+                reason = "malformed_json",
+                "Idle shutdown blocked by invalid worker activity"
+            );
+            bad("Invalid GCP activity reply")
+        })?;
         activity
             .get("busy")
             .and_then(Value::as_bool)
-            .ok_or_else(|| bad("GCP activity reply was incomplete"))
+            .ok_or_else(|| {
+                tracing::warn!(
+                    event = "worker_activity_invalid",
+                    reason = "missing_busy_field",
+                    "Idle shutdown blocked by incomplete worker activity"
+                );
+                bad("GCP activity reply was incomplete")
+            })
     }
 
     async fn stop_if_idle(&self) -> Result<()> {
         if self.active.load(Ordering::SeqCst) != 0 {
+            tracing::debug!(
+                event = "idle_shutdown_skipped",
+                reason = "active_work",
+                "VM remains active"
+            );
             return Ok(());
         }
         let _lock = self.lifecycle.lock().await;
         if self.active.load(Ordering::SeqCst) != 0 {
+            tracing::debug!(
+                event = "idle_shutdown_skipped",
+                reason = "active_work_after_lock",
+                "VM remains active"
+            );
             return Ok(());
         }
         let idle = self
@@ -378,21 +592,41 @@ impl Remote {
             .map_err(|_| bad("Idle tracking unavailable"))?
             .elapsed();
         if idle < self.settings.idle {
+            tracing::debug!(
+                event = "idle_shutdown_skipped",
+                reason = "idle_timeout_pending",
+                "VM idle interval not elapsed"
+            );
             return Ok(());
         }
         if self.vm_state().await? == "RUNNING" {
             // Never stop untracked work after a Railway restart or lost callback.
             if self.worker_busy().await? {
+                tracing::debug!(
+                    event = "idle_shutdown_skipped",
+                    reason = "worker_busy",
+                    "Worker reports active work"
+                );
                 if let Ok(mut last) = self.last_activity.lock() {
                     *last = Instant::now();
                 }
                 return Ok(());
             }
             // The lifecycle mutex blocks new dispatch until the stop request is accepted.
-            if self.vm_action("/stop").await? == LifecycleReply::Accepted {
+            tracing::info!(
+                event = "idle_shutdown_requested",
+                "Requesting idle VM shutdown"
+            );
+            if self.vm_action(ControllerOperation::Stop).await? == LifecycleReply::Accepted {
                 tracing::info!("Idle GCP extractor stop accepted");
             }
             // A 409 leaves shutdown pending; the next idle tick checks state again.
+        } else {
+            tracing::debug!(
+                event = "idle_shutdown_skipped",
+                reason = "vm_not_running",
+                "VM shutdown not needed"
+            );
         }
         Ok(())
     }
@@ -407,6 +641,8 @@ impl Remote {
     ) -> Result<StoredOutput> {
         let mut dispatched = None;
         for attempt in 0..2 {
+            tracing::info!(event = "worker_dispatch_started", worker_job_id = %remote, delivery_attempt = attempt + 1,
+                "Dispatching remote download with stable idempotency key");
             match self
                 .worker_req(Method::POST, "/api/v1/downloads")
                 .header("X-Idempotency-Key", remote.to_string())
@@ -415,11 +651,21 @@ impl Remote {
                 .await
             {
                 Ok(response) => {
+                    tracing::info!(event = "worker_dispatch_response", worker_job_id = %remote,
+                        http_status = response.status().as_u16(), "Worker dispatch response received");
                     dispatched = Some(response);
                     break;
                 }
-                Err(_) if attempt == 0 => tokio::time::sleep(Duration::from_secs(2)).await,
-                Err(_) => return Err(bad("Cannot dispatch job to GCP")),
+                Err(error) if attempt == 0 => {
+                    tracing::warn!(event = "worker_dispatch_retry", worker_job_id = %remote,
+                        error_category = transport_category(&error), "Retrying uncertain delivery with the same idempotency key");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                Err(error) => {
+                    tracing::warn!(event = "worker_dispatch_failed", worker_job_id = %remote,
+                        error_category = transport_category(&error), "Worker dispatch transport failed");
+                    return Err(bad("Cannot dispatch job to GCP"));
+                }
             }
         }
         let response = dispatched.ok_or_else(|| bad("GCP dispatch unavailable"))?;
@@ -429,21 +675,46 @@ impl Remote {
         if !response.status().is_success() {
             return Err(bad("GCP refused download request"));
         }
-        let job: WorkerJob = response
-            .json()
-            .await
-            .map_err(|_| bad("Invalid GCP dispatch reply"))?;
+        let job: WorkerJob = response.json().await.map_err(|_| {
+            tracing::warn!(
+                event = "worker_dispatch_invalid",
+                reason = "malformed_json",
+                "Worker dispatch response rejected"
+            );
+            bad("Invalid GCP dispatch reply")
+        })?;
         if job.job_id != remote {
+            tracing::warn!(
+                event = "worker_dispatch_invalid",
+                reason = "job_id_mismatch",
+                "Worker dispatch response rejected"
+            );
             return Err(bad("GCP returned a different job identifier"));
         }
+        tracing::info!(event = "worker_dispatch_accepted", worker_job_id = %remote, "Remote download accepted");
         let result = async {
+            let mut previous_state = None;
             loop {
                 let view = tokio::select! {
                     _ = cancel.cancelled() => return Err(AppError::new(ErrorCode::Cancelled, "Job cancelled")),
                     reply = self.worker_job(remote) => reply?,
                 };
                 let _ = progress.send(view.progress);
-                match view.status.as_str() {
+                // Only emit known state names, once per transition, never arbitrary worker text.
+                let state = match view.status.as_str() {
+                    "completed" => "completed", "failed" => "failed", "cancelled" => "cancelled",
+                    "queued" => "queued", "running" => "running",
+                    _ => {
+                        tracing::warn!(event = "worker_job_state_invalid", worker_job_id = %remote, "Unknown worker job state");
+                        return Err(bad("Unknown GCP job state"));
+                    }
+                };
+                if previous_state != Some(state) {
+                    tracing::info!(event = "worker_job_state_changed", worker_job_id = %remote,
+                        worker_state = state, "Remote download state changed");
+                    previous_state = Some(state);
+                }
+                match state {
                     "completed" => {
                         let output = view.output.ok_or_else(|| bad("Worker returned no completed file"))?;
                         return self.retrieve(local, remote, &output, cancel).await;
@@ -459,6 +730,10 @@ impl Remote {
                 }
             }
         }.await;
+        if let Err(error) = &result {
+            tracing::warn!(event = "worker_attempt_finished", worker_job_id = %remote,
+                error_code = ?error.code, "Remote download attempt failed or was cancelled");
+        }
         self.cancel_worker(remote).await;
         result
     }
@@ -469,19 +744,32 @@ impl Remote {
             .worker_req(Method::GET, &path)
             .send()
             .await
-            .map_err(|_| bad("Cannot fetch worker job state"))?;
+            .map_err(|error| {
+                tracing::warn!(event = "worker_job_poll_failed", worker_job_id = %id,
+                    error_category = transport_category(&error), "Worker job poll transport failed");
+                bad("Cannot fetch worker job state")
+            })?;
         if !response.status().is_success() {
+            tracing::warn!(event = "worker_job_poll_failed", worker_job_id = %id,
+                http_status = response.status().as_u16(), "Worker job poll HTTP request failed");
             return Err(bad("GCP job lookup failed"));
         }
-        response
-            .json()
-            .await
-            .map_err(|_| bad("Invalid GCP job status"))
+        response.json().await.map_err(|_| {
+            tracing::warn!(event = "worker_job_poll_invalid", worker_job_id = %id,
+                    reason = "malformed_json", "Worker job poll response rejected");
+            bad("Invalid GCP job status")
+        })
     }
 
     async fn cancel_worker(&self, id: Uuid) {
         let path = format!("/api/v1/downloads/{id}");
-        let _ = self.worker_req(Method::DELETE, &path).send().await;
+        tracing::info!(event = "worker_cleanup_started", worker_job_id = %id, "Requesting remote job cleanup");
+        match self.worker_req(Method::DELETE, &path).send().await {
+            Ok(response) => tracing::info!(event = "worker_cleanup_response", worker_job_id = %id,
+                http_status = response.status().as_u16(), "Remote job cleanup response received"),
+            Err(error) => tracing::warn!(event = "worker_cleanup_failed", worker_job_id = %id,
+                error_category = transport_category(&error), "Remote job cleanup transport failed"),
+        }
     }
 
     async fn retrieve(
@@ -491,25 +779,45 @@ impl Remote {
         output: &WorkerOutput,
         cancel: &CancellationToken,
     ) -> Result<StoredOutput> {
+        let started = Instant::now();
+        tracing::info!(event = "media_transfer_started", worker_job_id = %remote,
+            expected_bytes = output.size_bytes, "Starting remote media transfer");
         let ext = output.filename.rsplit('.').next().unwrap_or("");
         let mime = match ext {
             "mp4" => "video/mp4",
             "webm" => "video/webm",
             "mp3" => "audio/mpeg",
             "m4a" => "audio/mp4",
-            _ => return Err(bad("GCP produced an unsupported media file")),
+            _ => {
+                tracing::warn!(
+                    event = "media_transfer_failed",
+                    reason = "unsupported_extension",
+                    "Remote media file type rejected"
+                );
+                return Err(bad("GCP produced an unsupported media file"));
+            }
         };
         if output.size_bytes == 0 || output.size_bytes >= self.settings.max_bytes {
+            tracing::warn!(
+                event = "media_transfer_failed",
+                reason = "size_limit",
+                "Remote media size rejected"
+            );
             return Err(AppError::new(
                 ErrorCode::DownloadTooLarge,
                 "Remote file exceeds size limit",
             ));
         }
-        let dir = self.storage.create_job(job).await?;
+        let dir = self.storage.create_job(job).await.inspect_err(|error| {
+            tracing::warn!(event = "media_transfer_failed", error_code = ?error.code,
+                reason = "local_storage", "Cannot prepare local transfer storage");
+        })?;
         let result = async {
             let path = format!("/api/v1/downloads/{remote}/file");
             let mut response = self.worker_req(Method::GET, &path).send().await
                 .map_err(|_| bad("Cannot stream media from GCP"))?;
+            tracing::info!(event = "media_transfer_response", http_status = response.status().as_u16(),
+                "Remote media transfer response received");
             if response.status() != StatusCode::OK {
                 return Err(bad("GCP media response failed"));
             }
@@ -538,8 +846,27 @@ impl Remote {
             drop(file);
             self.storage.publish(job, &name, ext, mime).await
         }.await;
-        if result.is_err() {
-            let _ = self.storage.cleanup(job).await;
+        match &result {
+            Ok(output) => {
+                tracing::info!(event = "media_transfer_completed", worker_job_id = %remote,
+                size_bytes = output.size_bytes, elapsed_ms = started.elapsed().as_millis() as u64,
+                "Remote media transfer completed")
+            }
+            Err(error) => {
+                tracing::warn!(event = "media_transfer_failed", worker_job_id = %remote,
+                    error_code = ?error.code, cancelled = error.code == ErrorCode::Cancelled,
+                    elapsed_ms = started.elapsed().as_millis() as u64, "Remote media transfer failed or was cancelled");
+                tracing::info!(
+                    event = "local_partial_cleanup_started",
+                    "Cleaning up incomplete local transfer"
+                );
+                if self.storage.cleanup(job).await.is_err() {
+                    tracing::warn!(
+                        event = "local_partial_cleanup_failed",
+                        "Incomplete local transfer cleanup failed"
+                    );
+                }
+            }
         }
         result
     }
@@ -547,30 +874,62 @@ impl Remote {
 
 #[async_trait]
 impl Extractor for Remote {
+    #[tracing::instrument(name = "remote_metadata", skip_all, fields(operation = "metadata"))]
     async fn video_info(&self, url: &str) -> Result<VideoInfo> {
-        let _active = self.activity();
-        self.ensure_ready().await?;
-        let response = self
-            .worker_req(Method::POST, "/api/v1/videos/info")
-            .json(&json!({"url":url}))
-            .send()
-            .await
-            .map_err(|_| bad("GCP metadata request failed"))?;
-        if !response.status().is_success() {
-            return Err(AppError::new(
-                ErrorCode::AccessRestricted,
-                "GCP could not retrieve YouTube metadata",
-            ));
+        let started = Instant::now();
+        tracing::info!(
+            event = "metadata_started",
+            "Starting remote metadata request"
+        );
+        let result = async {
+            let _active = self.activity();
+            self.ensure_ready().await?;
+            let response = self
+                .worker_req(Method::POST, "/api/v1/videos/info")
+                .json(&json!({"url":url}))
+                .send()
+                .await
+                .map_err(|error| {
+                    tracing::warn!(
+                        event = "metadata_transport_failed",
+                        error_category = transport_category(&error),
+                        "Worker metadata transport failed"
+                    );
+                    bad("GCP metadata request failed")
+                })?;
+            tracing::info!(
+                event = "metadata_response_received",
+                http_status = response.status().as_u16(),
+                "Worker metadata response received"
+            );
+            if !response.status().is_success() {
+                return Err(AppError::new(
+                    ErrorCode::AccessRestricted,
+                    "GCP could not retrieve YouTube metadata",
+                ));
+            }
+            response
+                .json()
+                .await
+                .map_err(|_| bad("Invalid GCP metadata response"))
         }
-        response
-            .json()
-            .await
-            .map_err(|_| bad("Invalid GCP metadata response"))
+        .await;
+        match &result {
+            Ok(_) => tracing::info!(
+                event = "metadata_completed",
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "Remote metadata request completed"
+            ),
+            Err(error) => tracing::warn!(event = "metadata_failed", error_code = ?error.code,
+                elapsed_ms = started.elapsed().as_millis() as u64, "Remote metadata request failed"),
+        }
+        result
     }
 }
 
 #[async_trait]
 impl JobExecutor for Remote {
+    #[tracing::instrument(name = "remote_job", skip_all, fields(job_id = %id))]
     async fn run(
         &self,
         request: &DownloadRequest,
@@ -578,6 +937,12 @@ impl JobExecutor for Remote {
         cancel: CancellationToken,
         progress: watch::Sender<DownloadProgress>,
     ) -> Result<StoredOutput> {
+        let started = Instant::now();
+        tracing::info!(
+            event = "remote_job_started",
+            "Starting remote download execution"
+        );
+        let result = async {
         let _active = self.activity();
         tokio::select! {
             _ = cancel.cancelled() => return Err(AppError::new(ErrorCode::Cancelled, "Job cancelled")),
@@ -600,7 +965,8 @@ impl JobExecutor for Remote {
                         && attempt + 1 < self.settings.max_attempts
                         && !cancel.is_cancelled() =>
                 {
-                    tracing::warn!(job_id=%id, attempt=attempt+1, "Retrying interrupted extraction");
+                    tracing::warn!(event = "remote_extraction_retry", job_id=%id, attempt=attempt+1,
+                        "Retrying interrupted extraction with a fresh worker job identifier");
                     tokio::select! {
                         _ = cancel.cancelled() => return Err(AppError::new(ErrorCode::Cancelled, "Job cancelled")),
                         _ = tokio::time::sleep(Duration::from_secs(3)) => (),
@@ -610,10 +976,37 @@ impl JobExecutor for Remote {
             }
         }
         Err(bad("Remote job attempts exhausted"))
+        }.await;
+        match &result {
+            Ok(output) => tracing::info!(
+                event = "remote_job_completed",
+                size_bytes = output.size_bytes,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "Remote download completed"
+            ),
+            Err(error) => tracing::warn!(event = "remote_job_failed", error_code = ?error.code,
+                cancelled = error.code == ErrorCode::Cancelled,
+                elapsed_ms = started.elapsed().as_millis() as u64, "Remote download failed or was cancelled"),
+        }
+        result
     }
 
+    #[tracing::instrument(name = "remote_cleanup", skip_all, fields(job_id = %id))]
     async fn cleanup(&self, id: Uuid) -> Result<()> {
-        self.storage.cleanup(id).await
+        tracing::info!(
+            event = "local_cleanup_started",
+            "Cleaning up local remote-job output"
+        );
+        let result = self.storage.cleanup(id).await;
+        match &result {
+            Ok(()) => tracing::info!(
+                event = "local_cleanup_completed",
+                "Local remote-job output cleanup completed"
+            ),
+            Err(error) => tracing::warn!(event = "local_cleanup_failed", error_code = ?error.code,
+                "Local remote-job output cleanup failed"),
+        }
+        result
     }
 }
 
@@ -816,11 +1209,11 @@ mod tests {
         let (remote, _dir) = remote(&controller, &worker).await;
         assert_eq!(remote.vm_state().await.unwrap(), "RUNNING");
         assert_eq!(
-            remote.vm_action("/start").await.unwrap(),
+            remote.vm_action(ControllerOperation::Start).await.unwrap(),
             LifecycleReply::Accepted
         );
         assert_eq!(
-            remote.vm_action("/stop").await.unwrap(),
+            remote.vm_action(ControllerOperation::Stop).await.unwrap(),
             LifecycleReply::Accepted
         );
         assert!(remote.worker_ready().await);
@@ -932,7 +1325,7 @@ mod tests {
         let worker = mock(vec![]).await;
         let (remote, _dir) = remote(&controller, &worker).await;
         for status in statuses {
-            let result = remote.vm_action("/start").await;
+            let result = remote.vm_action(ControllerOperation::Start).await;
             match status {
                 StatusCode::OK | StatusCode::ACCEPTED => {
                     assert_eq!(result.unwrap(), LifecycleReply::Accepted)
@@ -1150,5 +1543,188 @@ mod tests {
         assert_eq!(remote.active.load(Ordering::SeqCst), 0);
         assert!(remote.lifecycle.try_lock().is_ok());
         assert!(worker.requests.lock().unwrap().is_empty());
+    }
+
+    #[derive(Clone, Default)]
+    struct LogCapture(Arc<StdMutex<Vec<u8>>>);
+    impl std::io::Write for LogCapture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+    fn log_subscriber(logs: LogCapture) -> impl tracing::Subscriber + Send + Sync {
+        tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .with_env_filter("youtube_extractor::remote=debug")
+            .with_writer(logs)
+            .finish()
+    }
+
+    #[tokio::test]
+    async fn lifecycle_rejections_include_fixed_operation_status_and_actionable_hint() {
+        let cases = [
+            (StatusCode::UNAUTHORIZED, "GCP_CONTROLLER_TOKEN"),
+            (StatusCode::FORBIDDEN, "Cloud Run invocation"),
+            (StatusCode::NOT_FOUND, "project/zone/instance"),
+            (StatusCode::METHOD_NOT_ALLOWED, "HTTP method"),
+            (StatusCode::TOO_MANY_REQUESTS, "rate limiting"),
+            (StatusCode::SERVICE_UNAVAILABLE, "runtime IAM"),
+            (StatusCode::TEMPORARY_REDIRECT, "Unexpected redirect"),
+            (StatusCode::NO_CONTENT, "response contract"),
+        ];
+        let controller = mock(cases.iter().map(|&(status, _)| Reply::new(status,
+            format!("{CONTROLLER_TOKEN} {WORKER_TOKEN} https://sensitive.example/private?token=secret"))).collect()).await;
+        let worker = mock(vec![]).await;
+        let (remote, _dir) = remote(&controller, &worker).await;
+        for (status, hint) in cases {
+            let error = remote
+                .vm_action(ControllerOperation::Start)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::Network);
+            assert!(error.message.starts_with(&format!(
+                "VM controller POST /start returned HTTP {}.",
+                status.as_u16()
+            )));
+            assert!(error.message.contains(hint));
+            assert!(!error.message.contains(CONTROLLER_TOKEN));
+            assert!(!error.message.contains(WORKER_TOKEN));
+            assert!(!error.message.contains("https://"));
+        }
+    }
+
+    #[tokio::test]
+    async fn safe_controller_logs_correlate_failed_startup_with_the_download_job() {
+        use tracing::instrument::WithSubscriber;
+        let sensitive_body =
+            format!("{CONTROLLER_TOKEN} {WORKER_TOKEN} https://sensitive.example?secret=value");
+        let controller = mock(vec![
+            Reply::state("TERMINATED"),
+            Reply::new(StatusCode::FORBIDDEN, sensitive_body),
+        ])
+        .await;
+        let worker = mock(vec![]).await;
+        let (remote, _dir) = remote(&controller, &worker).await;
+        let logs = LogCapture::default();
+        let request = serde_json::from_value(json!({
+            "url":"https://youtube.com/watch?v=abcdefghijk&private=never-log", "type":"audio", "format":"mp3"
+        })).unwrap();
+        let job_id = Uuid::new_v4();
+        let (progress, _) = watch::channel(DownloadProgress::default());
+        let error = remote
+            .run(&request, job_id, CancellationToken::new(), progress)
+            .with_subscriber(log_subscriber(logs.clone()))
+            .await
+            .unwrap_err();
+        assert!(error.message.contains("POST /start returned HTTP 403"));
+        let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        for secret in [
+            CONTROLLER_TOKEN,
+            WORKER_TOKEN,
+            "sensitive.example",
+            "secret=value",
+            "private=never-log",
+            "youtube.com",
+            "test-access-id",
+            "test-access-secret",
+            controller.origin.as_str(),
+        ] {
+            assert!(
+                !text.contains(secret),
+                "sensitive data appeared in captured tracing output"
+            );
+        }
+        let events: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        for name in [
+            "remote_job_started",
+            "vm_lifecycle_lock_waiting",
+            "vm_lifecycle_lock_acquired",
+            "controller_request_started",
+            "controller_response_received",
+            "vm_state_observed",
+            "controller_request_rejected",
+            "worker_startup_failed",
+            "remote_job_failed",
+        ] {
+            assert!(
+                events.iter().any(|event| event["fields"]["event"] == name),
+                "missing expected stage event"
+            );
+        }
+        let rejected = events
+            .iter()
+            .find(|event| event["fields"]["event"] == "controller_request_rejected")
+            .unwrap();
+        assert_eq!(rejected["fields"]["operation"], "start");
+        assert_eq!(rejected["fields"]["method"], "POST");
+        assert_eq!(rejected["fields"]["path"], "/start");
+        assert_eq!(rejected["fields"]["http_status"], 403);
+        assert!(rejected["fields"]["elapsed_ms"].is_u64());
+        assert_eq!(rejected["span"]["job_id"], job_id.to_string());
+        assert_eq!(rejected["span"]["name"], "remote_job");
+        assert!(worker.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn malformed_and_unavailable_controller_logs_omit_untrusted_content() {
+        use tracing::instrument::WithSubscriber;
+        let mut slow = Reply::state("RUNNING");
+        slow.delay = Duration::from_secs(5);
+        let controller = mock(vec![
+            Reply::state(CONTROLLER_TOKEN),
+            Reply::new(StatusCode::OK, format!("malformed-{WORKER_TOKEN}")),
+            Reply::new(StatusCode::OK, "x".repeat(MAX_CONTROLLER_STATUS_BYTES + 1)),
+            slow,
+        ])
+        .await;
+        let worker = mock(vec![]).await;
+        let (mut remote, _dir) = remote(&controller, &worker).await;
+        Arc::get_mut(&mut remote).unwrap().controller = controller_client()
+            .no_proxy()
+            .timeout(Duration::from_millis(50))
+            .build()
+            .unwrap();
+        let logs = LogCapture::default();
+        async {
+            for _ in 0..4 {
+                assert!(remote.vm_state().await.is_err());
+            }
+        }
+        .with_subscriber(log_subscriber(logs.clone()))
+        .await;
+        let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(!text.contains(CONTROLLER_TOKEN));
+        assert!(!text.contains(WORKER_TOKEN));
+        assert!(!text.contains(controller.origin.as_str()));
+        let events: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        for reason in ["unknown_state", "malformed_json", "oversized_body"] {
+            assert!(events
+                .iter()
+                .any(|event| event["fields"]["reason"] == reason));
+        }
+        let failed = events
+            .iter()
+            .find(|event| event["fields"]["event"] == "controller_transport_failed")
+            .unwrap();
+        assert_eq!(failed["fields"]["error_category"], "timeout");
+        assert_eq!(failed["fields"]["method"], "GET");
+        assert_eq!(failed["fields"]["path"], "/status");
     }
 }

@@ -281,7 +281,9 @@ impl Remote {
             .controller
             .join(path)
             .expect("fixed controller API path");
-        let mut request = self.controller.request(method.clone(), url)
+        let mut request = self
+            .controller
+            .request(method.clone(), url)
             .header("X-Controller-Token", self.settings.controller_token.clone());
         // Some controllers require an explicit Content-Length even for empty POST requests.
         if method == Method::POST {
@@ -1631,11 +1633,13 @@ mod tests {
         })).unwrap();
         let job_id = Uuid::new_v4();
         let (progress, _) = watch::channel(DownloadProgress::default());
-        let error = remote
-            .run(&request, job_id, CancellationToken::new(), progress)
-            .with_subscriber(log_subscriber(logs.clone()))
-            .await
-            .unwrap_err();
+        // Create the instrumented future while the capture subscriber is active:
+        // #[tracing::instrument] constructs its span when the async method is called.
+        let subscriber = tracing::Dispatch::new(log_subscriber(logs.clone()));
+        let operation = tracing::dispatcher::with_default(&subscriber, || {
+            remote.run(&request, job_id, CancellationToken::new(), progress)
+        });
+        let error = operation.with_subscriber(subscriber).await.unwrap_err();
         assert!(error.message.contains("POST /start returned HTTP 403"));
         let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
         for secret in [
@@ -1671,7 +1675,7 @@ mod tests {
         ] {
             assert!(
                 events.iter().any(|event| event["fields"]["event"] == name),
-                "missing expected stage event"
+                "missing expected stage event: {name}"
             );
         }
         let rejected = events

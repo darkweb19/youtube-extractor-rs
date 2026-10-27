@@ -281,9 +281,15 @@ impl Remote {
             .controller
             .join(path)
             .expect("fixed controller API path");
-        let response = self.controller.request(method.clone(), url)
-            .header("X-Controller-Token", self.settings.controller_token.clone())
-            .send().await.map_err(|error| {
+        let mut request = self.controller.request(method.clone(), url)
+            .header("X-Controller-Token", self.settings.controller_token.clone());
+        // Some controllers require an explicit Content-Length even for empty POST requests.
+        if method == Method::POST {
+            request = request
+                .header(reqwest::header::CONTENT_LENGTH, "0")
+                .body(Vec::new());
+        }
+        let response = request.send().await.map_err(|error| {
                 tracing::warn!(event = "controller_transport_failed", operation, method = %method,
                     path, elapsed_ms = started.elapsed().as_millis() as u64,
                     error_category = transport_category(&error), "VM controller transport failed");
@@ -1231,6 +1237,9 @@ mod tests {
         );
         for request in requests.iter() {
             assert_eq!(request.headers["X-Controller-Token"], CONTROLLER_TOKEN);
+            if request.method == Method::POST {
+                assert_eq!(request.headers[reqwest::header::CONTENT_LENGTH], "0");
+            }
             assert!(!request.headers.contains_key("Authorization"));
             assert!(!request.headers.contains_key("CF-Access-Client-Id"));
             assert!(!request.headers.contains_key("CF-Access-Client-Secret"));

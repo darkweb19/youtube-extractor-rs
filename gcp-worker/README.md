@@ -81,7 +81,7 @@ Verify `systemctl is-enabled warp-svc youtube-extractor cloudflared`.
 
 ## VM startup and shutdown
 
-Railway's `EXTRACTOR_MODE=remote` starts the VM with the Compute Engine API,
+Railway's `EXTRACTOR_MODE=remote` starts the VM through the keyless Cloud Run controller,
 waits for RUNNING + `/health`, then submits jobs to the worker's existing
 bounded Tokio queue. Queued jobs use UUIDs. Railway transfers outputs to its
 own storage before declaring success. Railway stops the VM after 300 seconds
@@ -116,24 +116,57 @@ for all videos. Download only media you are permitted to retrieve.
 
 ## Railway controller configuration
 
-Provision a scoped Google Cloud service account with permissions to inspect,
-start and stop only this VM: `compute.instances.get`,
-`compute.instances.start`, and `compute.instances.stop`.
-Give Railway its JSON service account credential as one **secret** variable
-(`GCP_SERVICE_ACCOUNT_JSON`); do not store it in source files or logs. Rotate
-the key if it has been exposed. Cloudflare Access service tokens must be
-authorized for the worker's hostname.
+Provision a separate Google Cloud Run VM controller implementing the contract
+below. Bind the project, zone and instance in the controller's configuration;
+Railway cannot select an arbitrary VM. Attach a runtime service account to Cloud
+Run with narrowly scoped permissions to inspect, start and stop only that VM:
+`compute.instances.get`, `compute.instances.start` and `compute.instances.stop`.
+The controller uses its attached runtime service identity for keyless Google
+authentication. Railway never calls Google OAuth or Compute Engine directly.
+
+Store the same independently generated controller secret in the controller's
+secret configuration and Railway's `GCP_CONTROLLER_TOKEN`. Use at least 32
+visible ASCII characters, for example a secret generated with `openssl rand
+-hex 32`. Keep it separate from the worker's bearer token and Cloudflare Access
+service token. Neither application logs nor error responses should contain it.
+Configure the controller's ingress and Cloud Run invocation policy to permit
+Railway's requests: Railway supplies the application-level `X-Controller-Token`
+header, not a Google IAM identity token. The controller must authenticate that
+header before inspecting or changing the VM, reject missing/incorrect tokens,
+and avoid exposing unauthenticated lifecycle operations. Cloudflare Access
+service tokens remain authorized for the worker's hostname.
+
+`GCP_CONTROLLER_URL` must be an HTTPS origin, with no embedded credentials,
+non-root path, query or fragment. Each request carries `X-Controller-Token`:
+
+| Method and path | Controller response |
+| --- | --- |
+| `GET /status` | HTTP `200` with JSON `{"status":"RUNNING"}` or another Compute Engine state |
+| `POST /start` | HTTP `202` when start is accepted, `200` if already running, `409` during a transient lifecycle state |
+| `POST /stop` | HTTP `202` when stop is accepted, `200` if already stopped, `409` during a transient lifecycle state |
+
+Lifecycle requests do not need a JSON response body. `202` indicates acceptance;
+Railway still polls VM state and worker readiness before dispatching work.
+`409` causes later polling/retry within the existing startup/idle lifecycle.
+Controller calls have bounded connection/request timeouts and never follow
+redirects. Unexpected HTTP codes, malformed state replies and unavailable
+controllers return safe errors without logging tokens or controller bodies.
+Worker requests retain their separate bearer and Cloudflare Access headers.
+
+The controller must be deployed separately; this worker bundle does not deploy
+or configure Cloud Run. For migration, remove `GCP_SERVICE_ACCOUNT_JSON` and the
+old project/zone/instance variables from Railway, configure the two controller
+variables, verify lifecycle operations, then revoke/delete the former
+service-account private key in Google Cloud. Do not retain it as a fallback.
 
 ```dotenv
 EXTRACTOR_MODE=remote
-GCP_PROJECT_ID=your-project-id
-GCP_ZONE=us-central1-a
-GCP_INSTANCE_NAME=instance-20261023-153455
+GCP_CONTROLLER_URL=https://controller.example.run.app
+GCP_CONTROLLER_TOKEN=<separate random secret of at least 32 visible ASCII characters>
 GCP_WORKER_URL=https://worker.example.com
 GCP_WORKER_TOKEN=<same random token as worker API_TOKEN>
 CF_ACCESS_CLIENT_ID=<access service token client ID>
 CF_ACCESS_CLIENT_SECRET=<access service token secret>
-GCP_SERVICE_ACCOUNT_JSON=<single-line service account JSON>
 GCP_IDLE_TIMEOUT_SECS=300
 GCP_START_TIMEOUT_SECS=300
 GCP_MAX_JOB_ATTEMPTS=2

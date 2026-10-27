@@ -248,5 +248,31 @@ To keep Railway always available but only pay for GCP while downloading, set
 The same Rust binary is packaged by `gcp-worker/package.sh` and installed
 as a GCP-only service; this preserves the existing authenticated v1 API and
 UI. GCP uses `YTDLP_PROXY=socks5://127.0.0.1:40000`, while Railway starts
-and stops the VM through the Google Compute Engine API. Do not enable remote
-mode until the worker, WARP, Cloudflare Tunnel/Access and IAM are configured.
+and stops the VM through a separately provisioned **keyless Google Cloud Run
+controller**. Set `GCP_CONTROLLER_URL` to its HTTPS origin (no credentials, path,
+query or fragment) and `GCP_CONTROLLER_TOKEN` to a separate random secret of at
+least 32 visible ASCII characters. Railway sends `X-Controller-Token` on every
+controller request; it does not call Google OAuth or Compute Engine directly.
+
+The controller binds one project, zone and VM in its own configuration and uses
+its attached Cloud Run runtime service identity with narrowly scoped
+`compute.instances.get`, `compute.instances.start` and `compute.instances.stop`
+permissions. No service-account private key belongs on Railway.
+
+| Controller request | Required response |
+| --- | --- |
+| `GET /status` | `200` with JSON such as `{"status":"RUNNING"}` or another Compute Engine state |
+| `POST /start` / `POST /stop` | `202` accepted, `200` already in desired state, or `409` while a lifecycle transition is in progress |
+
+Readiness polling remains bounded by `GCP_START_TIMEOUT_SECS`. The lifecycle
+mutex, queued jobs, worker Cloudflare Access authentication, file transfer,
+bounded retries, cancellation and idle shutdown remain in place. Controller
+requests use bounded HTTP timeouts and reject redirects; malformed or unavailable
+responses fail safely. Keep one Railway replica and a persistent `DATA_DIR`.
+
+When migrating, replace `GCP_SERVICE_ACCOUNT_JSON` with the two controller
+variables, remove Railway's old project/zone/instance variables, and revoke the
+old service-account key after confirming the controller works. Do not enable
+remote mode until the controller, worker, WARP, Cloudflare Tunnel/Access and
+IAM are configured. See the worker guide for the full configuration and
+controller authentication requirements.

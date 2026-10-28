@@ -5,7 +5,7 @@ use crate::{
     error::{AppError, ErrorCode, Result},
     extractor::Extractor,
     jobs::JobExecutor,
-    model::{DownloadRequest, VideoInfo},
+    model::{DownloadRequest, JobState, JobView, OutputInfo, VideoInfo},
     storage::{LocalStorage, Storage, StoredOutput},
 };
 use async_trait::async_trait;
@@ -162,20 +162,6 @@ struct Settings {
 #[derive(Deserialize)]
 struct Instance {
     status: String,
-}
-
-#[derive(Deserialize)]
-struct WorkerOutput {
-    filename: String,
-    size_bytes: u64,
-}
-
-#[derive(Deserialize)]
-struct WorkerJob {
-    job_id: Uuid,
-    status: String,
-    progress: DownloadProgress,
-    output: Option<WorkerOutput>,
 }
 
 struct Activity<'a>(&'a Remote);
@@ -683,7 +669,7 @@ impl Remote {
         if !response.status().is_success() {
             return Err(bad("GCP refused download request"));
         }
-        let job: WorkerJob = response.json().await.map_err(|_| {
+        let job: JobView = response.json().await.map_err(|_| {
             tracing::warn!(
                 event = "worker_dispatch_invalid",
                 reason = "malformed_json",
@@ -691,7 +677,8 @@ impl Remote {
             );
             bad("Invalid GCP dispatch reply")
         })?;
-        if job.job_id != remote {
+        let job_id = Uuid::parse_str(&job.job_id).map_err(|_| bad("Invalid GCP dispatch reply"))?;
+        if job_id != remote {
             tracing::warn!(
                 event = "worker_dispatch_invalid",
                 reason = "job_id_mismatch",
@@ -707,30 +694,33 @@ impl Remote {
                     _ = cancel.cancelled() => return Err(AppError::new(ErrorCode::Cancelled, "Job cancelled")),
                     reply = self.worker_job(remote) => reply?,
                 };
-                let _ = progress.send(view.progress);
-                // Only emit known state names, once per transition, never arbitrary worker text.
-                let state = match view.status.as_str() {
-                    "completed" => "completed", "failed" => "failed", "cancelled" => "cancelled",
-                    "queued" => "queued", "running" => "running",
-                    _ => {
-                        tracing::warn!(event = "worker_job_state_invalid", worker_job_id = %remote, "Unknown worker job state");
-                        return Err(bad("Unknown GCP job state"));
-                    }
+                // The public worker view contains byte counts, not the pipeline's internal stage.
+                // Derive the latter from the typed worker state instead of accepting worker text.
+                let state = match view.status {
+                    JobState::Queued => "queued",
+                    JobState::Running => "running",
+                    JobState::Completed => "completed",
+                    JobState::Failed => "failed",
+                    JobState::Cancelled => "cancelled",
                 };
+                let _ = progress.send(DownloadProgress {
+                    downloaded_bytes: view.progress.downloaded_bytes,
+                    total_bytes: view.progress.total_bytes,
+                    stage: state.to_owned(),
+                });
                 if previous_state != Some(state) {
                     tracing::info!(event = "worker_job_state_changed", worker_job_id = %remote,
                         worker_state = state, "Remote download state changed");
                     previous_state = Some(state);
                 }
-                match state {
-                    "completed" => {
+                match view.status {
+                    JobState::Completed => {
                         let output = view.output.ok_or_else(|| bad("Worker returned no completed file"))?;
                         return self.retrieve(local, remote, &output, cancel).await;
                     }
-                    "failed" => return Err(AppError::new(ErrorCode::DownloadInterrupted, "GCP download failed")),
-                    "cancelled" => return Err(AppError::new(ErrorCode::Cancelled, "GCP download cancelled")),
-                    "queued" | "running" => (),
-                    _ => return Err(bad("Unknown GCP job state")),
+                    JobState::Failed => return Err(AppError::new(ErrorCode::DownloadInterrupted, "GCP download failed")),
+                    JobState::Cancelled => return Err(AppError::new(ErrorCode::Cancelled, "GCP download cancelled")),
+                    JobState::Queued | JobState::Running => (),
                 }
                 tokio::select! {
                     _ = cancel.cancelled() => return Err(AppError::new(ErrorCode::Cancelled, "Job cancelled")),
@@ -746,7 +736,7 @@ impl Remote {
         result
     }
 
-    async fn worker_job(&self, id: Uuid) -> Result<WorkerJob> {
+    async fn worker_job(&self, id: Uuid) -> Result<JobView> {
         let path = format!("/api/v1/downloads/{id}");
         let response = self
             .worker_req(Method::GET, &path)
@@ -762,11 +752,16 @@ impl Remote {
                 http_status = response.status().as_u16(), "Worker job poll HTTP request failed");
             return Err(bad("GCP job lookup failed"));
         }
-        response.json().await.map_err(|_| {
+        let job: JobView = response.json().await.map_err(|_| {
             tracing::warn!(event = "worker_job_poll_invalid", worker_job_id = %id,
                     reason = "malformed_json", "Worker job poll response rejected");
             bad("Invalid GCP job status")
-        })
+        })?;
+        let job_id = Uuid::parse_str(&job.job_id).map_err(|_| bad("Invalid GCP job status"))?;
+        if job_id != id {
+            return Err(bad("GCP returned a different job identifier"));
+        }
+        Ok(job)
     }
 
     async fn cancel_worker(&self, id: Uuid) {
@@ -784,7 +779,7 @@ impl Remote {
         &self,
         job: Uuid,
         remote: Uuid,
-        output: &WorkerOutput,
+        output: &OutputInfo,
         cancel: &CancellationToken,
     ) -> Result<StoredOutput> {
         let started = Instant::now();

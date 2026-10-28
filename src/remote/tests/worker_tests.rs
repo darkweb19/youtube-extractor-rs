@@ -287,3 +287,51 @@ async fn terminal_job_states_transfer_completed_output_and_report_failures() {
             .any(|request| request.path.ends_with("/file")));
     }
 }
+
+// Group 5: reject invalid and mismatched identifiers at dispatch and poll
+// boundaries so a response cannot redirect work to another job.
+#[tokio::test]
+async fn dispatch_and_poll_reject_malformed_or_mismatched_job_ids() {
+    for response_id in [Uuid::nil().to_string(), "not-a-uuid".into()] {
+        let local_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4();
+        let mut response = worker_test_view(worker_id, JobState::Queued, 0, None, None);
+        response.job_id = response_id;
+        let controller = mock(vec![]).await;
+        let worker = mock(vec![worker_test_reply(StatusCode::ACCEPTED, &response)]).await;
+        let (client, _dir) = remote(&controller, &worker).await;
+        let (progress, _) = watch::channel(DownloadProgress::default());
+        let error = client
+            .run_attempt(
+                &worker_test_request(),
+                local_id,
+                worker_id,
+                &CancellationToken::new(),
+                &progress,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Network);
+        assert!(worker
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.method == Method::POST));
+    }
+
+    for response_id in [Uuid::nil().to_string(), "not-a-uuid".into()] {
+        let requested_id = Uuid::new_v4();
+        let mut response = worker_test_view(requested_id, JobState::Running, 3, Some(10), None);
+        response.job_id = response_id;
+        let controller = mock(vec![]).await;
+        let worker = mock(vec![worker_test_reply(StatusCode::OK, &response)]).await;
+        let (client, _dir) = remote(&controller, &worker).await;
+        let error = client.worker_job(requested_id).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Network);
+        assert!(
+            error.message.contains("different job identifier")
+                || error.message.contains("Invalid GCP job status")
+        );
+    }
+}

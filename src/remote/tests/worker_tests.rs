@@ -184,3 +184,106 @@ async fn queued_and_running_polls_update_progress_from_job_view_bytes() {
     assert_eq!(terminal_progress.stage, "failed");
     assert_eq!(terminal_progress.downloaded_bytes, 100);
 }
+
+// Group 4: completed output is transferred and published; failed and cancelled
+// worker states become safe local errors and each terminal path requests cleanup.
+fn worker_test_output(filename: &str, size_bytes: u64) -> OutputInfo {
+    OutputInfo {
+        filename: filename.into(),
+        mime_type: "audio/mpeg".into(),
+        size_bytes,
+    }
+}
+
+#[tokio::test]
+async fn terminal_job_states_transfer_completed_output_and_report_failures() {
+    let local_id = Uuid::new_v4();
+    let worker_id = Uuid::new_v4();
+    let queued = worker_test_view(worker_id, JobState::Queued, 0, None, None);
+    let completed = worker_test_view(
+        worker_id,
+        JobState::Completed,
+        7,
+        Some(7),
+        Some(worker_test_output("result.mp3", 7)),
+    );
+    let controller = mock(vec![]).await;
+    let worker = mock(vec![
+        worker_test_reply(StatusCode::ACCEPTED, &queued),
+        worker_test_reply(StatusCode::OK, &completed),
+        Reply::new(StatusCode::OK, "payload"),
+        Reply::new(StatusCode::NO_CONTENT, ""),
+    ])
+    .await;
+    let (client, _dir) = remote(&controller, &worker).await;
+    let (progress, received) = watch::channel(DownloadProgress::default());
+    let output = client
+        .run_attempt(
+            &worker_test_request(),
+            local_id,
+            worker_id,
+            &CancellationToken::new(),
+            &progress,
+        )
+        .await
+        .unwrap();
+    assert_eq!(output.size_bytes, 7);
+    assert_eq!(output.filename, format!("{local_id}.mp3"));
+    assert_eq!(tokio::fs::read(&output.path).await.unwrap(), b"payload");
+    let completed_progress = received.borrow().clone();
+    assert_eq!(completed_progress.stage, "completed");
+    assert_eq!(completed_progress.downloaded_bytes, 7);
+    assert_eq!(completed_progress.total_bytes, Some(7));
+    assert_eq!(
+        worker.requests.lock().unwrap()[2].path,
+        format!("/api/v1/downloads/{worker_id}/file")
+    );
+    assert_eq!(worker.requests.lock().unwrap()[3].method, Method::DELETE);
+
+    for (state, expected_code) in [
+        (JobState::Failed, ErrorCode::DownloadInterrupted),
+        (JobState::Cancelled, ErrorCode::Cancelled),
+    ] {
+        let local_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4();
+        let dispatch = worker_test_view(worker_id, JobState::Queued, 0, None, None);
+        let terminal = worker_test_view(worker_id, state, 3, Some(10), None);
+        let controller = mock(vec![]).await;
+        let worker = mock(vec![
+            worker_test_reply(StatusCode::ACCEPTED, &dispatch),
+            worker_test_reply(StatusCode::OK, &terminal),
+            Reply::new(StatusCode::NO_CONTENT, ""),
+        ])
+        .await;
+        let (client, _dir) = remote(&controller, &worker).await;
+        let (progress, received) = watch::channel(DownloadProgress::default());
+        let error = client
+            .run_attempt(
+                &worker_test_request(),
+                local_id,
+                worker_id,
+                &CancellationToken::new(),
+                &progress,
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, expected_code);
+        let terminal_progress = received.borrow().clone();
+        assert_eq!(
+            terminal_progress.stage,
+            if state == JobState::Failed {
+                "failed"
+            } else {
+                "cancelled"
+            }
+        );
+        assert_eq!(terminal_progress.downloaded_bytes, 3);
+        assert_eq!(terminal_progress.total_bytes, Some(10));
+        let requests = worker.requests.lock().unwrap();
+        assert_eq!(requests.last().unwrap().method, Method::DELETE);
+        assert!(!requests
+            .iter()
+            .any(|request| request.path.ends_with("/file")));
+    }
+}

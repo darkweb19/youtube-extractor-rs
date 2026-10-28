@@ -126,3 +126,61 @@ async fn dispatch_accepts_http_202_with_worker_auth_and_idempotency_key() {
     assert_eq!(requests[1].path, format!("/api/v1/downloads/{worker_id}"));
     assert_eq!(requests[2].method, Method::DELETE);
 }
+
+// Group 3: active states map to the controller progress type while preserving
+// byte counts; the client derives the internal stage from the typed status.
+#[tokio::test]
+async fn queued_and_running_polls_update_progress_from_job_view_bytes() {
+    let local_id = Uuid::new_v4();
+    let worker_id = Uuid::new_v4();
+    let dispatch = worker_test_view(worker_id, JobState::Queued, 0, None, None);
+    let queued = worker_test_view(worker_id, JobState::Queued, 12, None, None);
+    let running = worker_test_view(worker_id, JobState::Running, 64, Some(100), None);
+    let failed = worker_test_view(worker_id, JobState::Failed, 100, Some(100), None);
+    let controller = mock(vec![]).await;
+    let worker = mock(vec![
+        worker_test_reply(StatusCode::ACCEPTED, &dispatch),
+        worker_test_reply(StatusCode::OK, &queued),
+        worker_test_reply(StatusCode::OK, &running),
+        worker_test_reply(StatusCode::OK, &failed),
+        Reply::new(StatusCode::NO_CONTENT, ""),
+    ])
+    .await;
+    let (client, _dir) = remote(&controller, &worker).await;
+    let request = worker_test_request();
+    let cancellation = CancellationToken::new();
+    let (progress, mut received) = watch::channel(DownloadProgress::default());
+    let task = tokio::spawn(async move {
+        client
+            .run_attempt(&request, local_id, worker_id, &cancellation, &progress)
+            .await
+    });
+
+    tokio::time::timeout(Duration::from_secs(2), received.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    let queued_progress = received.borrow_and_update().clone();
+    assert_eq!(queued_progress.stage, "queued");
+    assert_eq!(queued_progress.downloaded_bytes, 12);
+    assert_eq!(queued_progress.total_bytes, None);
+
+    tokio::time::timeout(Duration::from_secs(5), received.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    let running_progress = received.borrow_and_update().clone();
+    assert_eq!(running_progress.stage, "running");
+    assert_eq!(running_progress.downloaded_bytes, 64);
+    assert_eq!(running_progress.total_bytes, Some(100));
+
+    let error = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::DownloadInterrupted);
+    let terminal_progress = received.borrow().clone();
+    assert_eq!(terminal_progress.stage, "failed");
+    assert_eq!(terminal_progress.downloaded_bytes, 100);
+}

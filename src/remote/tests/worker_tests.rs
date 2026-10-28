@@ -64,3 +64,65 @@ async fn worker_poll_deserializes_the_public_job_view_contract() {
     assert_eq!(decoded.progress.total_bytes, Some(100));
     assert_eq!(decoded.progress.percent, Some(64.0));
 }
+
+// Group 2: 202 is an accepted dispatch, with worker credentials and the stable
+// idempotency key attached to the request.
+fn worker_test_request() -> DownloadRequest {
+    use crate::model::{DownloadKind, OutputFormat};
+
+    DownloadRequest {
+        url: "https://youtube.com/watch?v=dQw4w9WgXcQ".into(),
+        kind: DownloadKind::Audio,
+        format: OutputFormat::Mp3,
+        quality: None,
+        audio_bitrate_kbps: None,
+    }
+}
+
+#[tokio::test]
+async fn dispatch_accepts_http_202_with_worker_auth_and_idempotency_key() {
+    let local_id = Uuid::new_v4();
+    let worker_id = Uuid::new_v4();
+    let accepted = worker_test_view(worker_id, JobState::Queued, 0, None, None);
+    let failed = worker_test_view(worker_id, JobState::Failed, 0, None, None);
+    let controller = mock(vec![]).await;
+    let worker = mock(vec![
+        worker_test_reply(StatusCode::ACCEPTED, &accepted),
+        worker_test_reply(StatusCode::OK, &failed),
+        Reply::new(StatusCode::NO_CONTENT, ""),
+    ])
+    .await;
+    let (client, _dir) = remote(&controller, &worker).await;
+    let (progress, _) = watch::channel(DownloadProgress::default());
+
+    let error = client
+        .run_attempt(
+            &worker_test_request(),
+            local_id,
+            worker_id,
+            &CancellationToken::new(),
+            &progress,
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::DownloadInterrupted);
+    let requests = worker.requests.lock().unwrap();
+    assert_eq!(requests[0].method, Method::POST);
+    assert_eq!(requests[0].path, "/api/v1/downloads");
+    assert_eq!(
+        requests[0].headers["Authorization"],
+        format!("Bearer {WORKER_TOKEN}")
+    );
+    assert_eq!(requests[0].headers["CF-Access-Client-Id"], "test-access-id");
+    assert_eq!(
+        requests[0].headers["CF-Access-Client-Secret"],
+        "test-access-secret"
+    );
+    assert_eq!(
+        requests[0].headers["X-Idempotency-Key"],
+        worker_id.to_string()
+    );
+    assert_eq!(requests[1].path, format!("/api/v1/downloads/{worker_id}"));
+    assert_eq!(requests[2].method, Method::DELETE);
+}

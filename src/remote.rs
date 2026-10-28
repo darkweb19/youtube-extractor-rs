@@ -1033,6 +1033,7 @@ impl JobExecutor for Remote {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod worker_tests;
     use axum::{
         body::Body,
         extract::{Request, State},

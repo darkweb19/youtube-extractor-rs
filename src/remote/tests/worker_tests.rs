@@ -544,3 +544,205 @@ async fn truncated_worker_body_logs_fixed_reason_without_body_content() {
         .unwrap();
     assert_eq!(rejection["fields"]["reason"], "invalid_response_body");
 }
+
+// Group 7: keep uncertain-delivery retry, queue-full handling, cancellation
+// cleanup, and output validation from crossing the worker trust boundary.
+#[tokio::test]
+async fn uncertain_dispatch_retries_with_the_same_idempotency_key() {
+    let local_id = Uuid::new_v4();
+    let worker_id = Uuid::new_v4();
+    let accepted = worker_test_view(worker_id, JobState::Queued, 0, None, None);
+    let failed = worker_test_view(worker_id, JobState::Failed, 0, None, None);
+    let mut timed_out = worker_test_reply(StatusCode::ACCEPTED, &accepted);
+    timed_out.delay = Duration::from_secs(2);
+    let controller = mock(vec![]).await;
+    let worker = mock(vec![
+        timed_out,
+        worker_test_reply(StatusCode::ACCEPTED, &accepted),
+        worker_test_reply(StatusCode::OK, &failed),
+        Reply::new(StatusCode::NO_CONTENT, ""),
+    ])
+    .await;
+    let (client, _dir) = remote(&controller, &worker).await;
+    let request = worker_test_request();
+    let cancellation = CancellationToken::new();
+    let (progress, _) = watch::channel(DownloadProgress::default());
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.run_attempt(&request, local_id, worker_id, &cancellation, &progress),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::DownloadInterrupted);
+    let requests = worker.requests.lock().unwrap();
+    let dispatches: Vec<_> = requests
+        .iter()
+        .filter(|request| request.method == Method::POST)
+        .collect();
+    assert_eq!(dispatches.len(), 2);
+    assert_eq!(
+        dispatches[0].headers["X-Idempotency-Key"],
+        worker_id.to_string()
+    );
+    assert_eq!(
+        dispatches[1].headers["X-Idempotency-Key"],
+        worker_id.to_string()
+    );
+}
+
+#[tokio::test]
+async fn cancellation_and_invalid_outputs_cleanup_without_streaming_bad_files() {
+    let local_id = Uuid::new_v4();
+    let worker_id = Uuid::new_v4();
+    let accepted = worker_test_view(worker_id, JobState::Queued, 0, None, None);
+    let controller = mock(vec![]).await;
+    let mut delayed_poll = worker_test_reply(StatusCode::OK, &accepted);
+    delayed_poll.delay = Duration::from_secs(5);
+    let worker = mock(vec![
+        worker_test_reply(StatusCode::ACCEPTED, &accepted),
+        delayed_poll,
+        Reply::new(StatusCode::NO_CONTENT, ""),
+    ])
+    .await;
+    let (client, _dir) = remote(&controller, &worker).await;
+    let cancellation = CancellationToken::new();
+    let run_remote = client.clone();
+    let run_cancellation = cancellation.clone();
+    let request = worker_test_request();
+    let (progress, _) = watch::channel(DownloadProgress::default());
+    let attempt = tokio::spawn(async move {
+        run_remote
+            .run_attempt(&request, local_id, worker_id, &run_cancellation, &progress)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let poll_started = worker
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|request| request.method == Method::GET);
+            if poll_started {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    cancellation.cancel();
+    let error = tokio::time::timeout(Duration::from_secs(2), attempt)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Cancelled);
+    {
+        let requests = worker.requests.lock().unwrap();
+        assert_eq!(requests[0].method, Method::POST);
+        assert_eq!(requests[1].method, Method::GET);
+        assert_eq!(requests[2].method, Method::DELETE);
+    }
+
+    let local_id = Uuid::new_v4();
+    let worker_id = Uuid::new_v4();
+    let dispatch = worker_test_view(worker_id, JobState::Queued, 0, None, None);
+    let controller = mock(vec![]).await;
+    let worker = mock(vec![
+        worker_test_reply(StatusCode::ACCEPTED, &dispatch),
+        Reply::new(StatusCode::INTERNAL_SERVER_ERROR, "poll-body-secret"),
+        Reply::new(StatusCode::NO_CONTENT, ""),
+    ])
+    .await;
+    let (client, _dir) = remote(&controller, &worker).await;
+    let (progress, _) = watch::channel(DownloadProgress::default());
+    let error = client
+        .run_attempt(
+            &worker_test_request(),
+            local_id,
+            worker_id,
+            &CancellationToken::new(),
+            &progress,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Network);
+    assert!(!error.message.contains("poll-body-secret"));
+    {
+        let requests = worker.requests.lock().unwrap();
+        assert_eq!(requests[0].method, Method::POST);
+        assert_eq!(requests[1].method, Method::GET);
+        assert_eq!(requests[2].method, Method::DELETE);
+    }
+
+    for (filename, size_bytes, expected_code) in [
+        ("payload.exe", 10, ErrorCode::Network),
+        ("empty.mp3", 0, ErrorCode::DownloadTooLarge),
+        ("limit.mp3", 1024, ErrorCode::DownloadTooLarge),
+    ] {
+        let local_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4();
+        let dispatch = worker_test_view(worker_id, JobState::Queued, 0, None, None);
+        let completed = worker_test_view(
+            worker_id,
+            JobState::Completed,
+            size_bytes,
+            Some(size_bytes),
+            Some(worker_test_output(filename, size_bytes)),
+        );
+        let controller = mock(vec![]).await;
+        let worker = mock(vec![
+            worker_test_reply(StatusCode::ACCEPTED, &dispatch),
+            worker_test_reply(StatusCode::OK, &completed),
+            Reply::new(StatusCode::NO_CONTENT, ""),
+        ])
+        .await;
+        let (client, _dir) = remote(&controller, &worker).await;
+        let (progress, _) = watch::channel(DownloadProgress::default());
+        let error = client
+            .run_attempt(
+                &worker_test_request(),
+                local_id,
+                worker_id,
+                &CancellationToken::new(),
+                &progress,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, expected_code);
+        assert!(worker
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| !request.path.ends_with("/file")));
+    }
+
+    let local_id = Uuid::new_v4();
+    let worker_id = Uuid::new_v4();
+    let controller = mock(vec![]).await;
+    let worker = mock(vec![Reply::new(
+        StatusCode::TOO_MANY_REQUESTS,
+        "queue-secret",
+    )])
+    .await;
+    let (client, _dir) = remote(&controller, &worker).await;
+    let (progress, _) = watch::channel(DownloadProgress::default());
+    let error = client
+        .run_attempt(
+            &worker_test_request(),
+            local_id,
+            worker_id,
+            &CancellationToken::new(),
+            &progress,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::QueueFull);
+    assert!(!error.message.contains("queue-secret"));
+    assert_eq!(worker.requests.lock().unwrap().len(), 1);
+}

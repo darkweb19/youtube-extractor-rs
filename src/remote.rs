@@ -669,18 +669,27 @@ impl Remote {
         if !response.status().is_success() {
             return Err(bad("GCP refused download request"));
         }
-        let job: JobView = response.json().await.map_err(|_| {
+        let http_status = response.status().as_u16();
+        let job: JobView = response.json().await.map_err(|error| {
             tracing::warn!(
                 event = "worker_dispatch_invalid",
-                reason = "malformed_json",
+                worker_job_id = %remote,
+                http_status,
+                reason = "invalid_response_body",
+                error_category = transport_category(&error),
                 "Worker dispatch response rejected"
             );
             bad("Invalid GCP dispatch reply")
         })?;
-        let job_id = Uuid::parse_str(&job.job_id).map_err(|_| bad("Invalid GCP dispatch reply"))?;
+        let job_id = Uuid::parse_str(&job.job_id).map_err(|_| {
+            tracing::warn!(event = "worker_dispatch_invalid", worker_job_id = %remote,
+                reason = "invalid_uuid", "Worker dispatch response rejected");
+            bad("Invalid GCP dispatch reply")
+        })?;
         if job_id != remote {
             tracing::warn!(
                 event = "worker_dispatch_invalid",
+                worker_job_id = %remote,
                 reason = "job_id_mismatch",
                 "Worker dispatch response rejected"
             );
@@ -752,13 +761,21 @@ impl Remote {
                 http_status = response.status().as_u16(), "Worker job poll HTTP request failed");
             return Err(bad("GCP job lookup failed"));
         }
-        let job: JobView = response.json().await.map_err(|_| {
+        let http_status = response.status().as_u16();
+        let job: JobView = response.json().await.map_err(|error| {
             tracing::warn!(event = "worker_job_poll_invalid", worker_job_id = %id,
-                    reason = "malformed_json", "Worker job poll response rejected");
+                    http_status, reason = "invalid_response_body", error_category = transport_category(&error),
+                    "Worker job poll response rejected");
             bad("Invalid GCP job status")
         })?;
-        let job_id = Uuid::parse_str(&job.job_id).map_err(|_| bad("Invalid GCP job status"))?;
+        let job_id = Uuid::parse_str(&job.job_id).map_err(|_| {
+            tracing::warn!(event = "worker_job_poll_invalid", worker_job_id = %id,
+                reason = "invalid_uuid", "Worker job poll response rejected");
+            bad("Invalid GCP job status")
+        })?;
         if job_id != id {
+            tracing::warn!(event = "worker_job_poll_invalid", worker_job_id = %id,
+                reason = "job_id_mismatch", "Worker job poll response rejected");
             return Err(bad("GCP returned a different job identifier"));
         }
         Ok(job)

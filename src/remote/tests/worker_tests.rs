@@ -335,3 +335,212 @@ async fn dispatch_and_poll_reject_malformed_or_mismatched_job_ids() {
         );
     }
 }
+
+// Group 6: malformed JSON and invalid model field types fail with fixed errors
+// that do not expose raw worker response contents.
+#[tokio::test]
+async fn malformed_and_wrong_type_worker_payloads_fail_safely() {
+    let id = Uuid::new_v4();
+    let model_value = || {
+        serde_json::to_value(worker_test_view(
+            id,
+            JobState::Running,
+            4,
+            Some(10),
+            Some(worker_test_output("result.mp3", 7)),
+        ))
+        .unwrap()
+    };
+
+    let mut wrong_status = model_value();
+    wrong_status["status"] = json!("pending-secret");
+    let mut wrong_progress = model_value();
+    wrong_progress["progress"]["downloaded_bytes"] = json!("four-secret");
+    let mut wrong_total = model_value();
+    wrong_total["progress"]["total_bytes"] = json!("ten-secret");
+    let mut wrong_percent = model_value();
+    wrong_percent["progress"]["percent"] = json!("forty-secret");
+    let mut wrong_output_size = model_value();
+    wrong_output_size["output"]["size_bytes"] = json!("seven-secret");
+    let mut missing_downloaded_bytes = model_value();
+    missing_downloaded_bytes["progress"]
+        .as_object_mut()
+        .unwrap()
+        .remove("downloaded_bytes");
+    let mut missing_status = model_value();
+    missing_status.as_object_mut().unwrap().remove("status");
+    let mut numeric_job_id = model_value();
+    numeric_job_id["job_id"] = json!(12345);
+
+    let invalid_bodies = vec![
+        "malformed-secret {".to_string(),
+        serde_json::to_string(&wrong_status).unwrap(),
+        serde_json::to_string(&wrong_progress).unwrap(),
+        serde_json::to_string(&wrong_total).unwrap(),
+        serde_json::to_string(&wrong_percent).unwrap(),
+        serde_json::to_string(&wrong_output_size).unwrap(),
+        serde_json::to_string(&missing_downloaded_bytes).unwrap(),
+        serde_json::to_string(&missing_status).unwrap(),
+        serde_json::to_string(&numeric_job_id).unwrap(),
+    ];
+    for body in invalid_bodies.iter() {
+        let controller = mock(vec![]).await;
+        let worker = mock(vec![Reply::new(StatusCode::OK, body.clone())]).await;
+        let (client, _dir) = remote(&controller, &worker).await;
+        let error = client.worker_job(id).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Network);
+        assert!(!error.message.contains("secret"));
+    }
+
+    for body in invalid_bodies {
+        let local_id = Uuid::new_v4();
+        // Keep the UUID valid so this test proves schema rejection, rather
+        // than succeeding only because the response identifies another job.
+        let worker_id = id;
+        let controller = mock(vec![]).await;
+        let worker = mock(vec![Reply::new(StatusCode::ACCEPTED, body)]).await;
+        let (client, _dir) = remote(&controller, &worker).await;
+        let (progress, _) = watch::channel(DownloadProgress::default());
+        let error = client
+            .run_attempt(
+                &worker_test_request(),
+                local_id,
+                worker_id,
+                &CancellationToken::new(),
+                &progress,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Network);
+        assert_eq!(error.message, "Invalid GCP dispatch reply");
+        assert!(!error.message.contains("secret"));
+        assert_eq!(worker.requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn worker_decode_diagnostics_keep_untrusted_payloads_out_of_logs() {
+    use tracing::instrument::WithSubscriber;
+
+    let id = Uuid::new_v4();
+    let mut invalid: Value =
+        serde_json::to_value(worker_test_view(id, JobState::Running, 4, Some(10), None)).unwrap();
+    invalid["status"] = json!("pending-secret-marker");
+    invalid["download_url"] = json!("https://sensitive.example/private?token=secret-marker");
+    let body = serde_json::to_string(&invalid).unwrap();
+
+    let controller = mock(vec![]).await;
+    let worker = mock(vec![Reply::new(StatusCode::OK, body.clone())]).await;
+    let (client, _dir) = remote(&controller, &worker).await;
+    let logs = LogCapture::default();
+    let subscriber = tracing::Dispatch::new(log_subscriber(logs.clone()));
+    let operation = tracing::dispatcher::with_default(&subscriber, || client.worker_job(id));
+    assert!(operation.with_subscriber(subscriber).await.is_err());
+    let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert!(!text.contains("pending-secret-marker"));
+    assert!(!text.contains("sensitive.example"));
+    assert!(!text.contains("secret-marker"));
+    let events: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let rejection = events
+        .iter()
+        .find(|event| event["fields"]["event"] == "worker_job_poll_invalid")
+        .unwrap();
+    assert_eq!(rejection["fields"]["reason"], "invalid_response_body");
+
+    let controller = mock(vec![]).await;
+    let worker = mock(vec![Reply::new(StatusCode::ACCEPTED, body)]).await;
+    let (client, _dir) = remote(&controller, &worker).await;
+    let logs = LogCapture::default();
+    let subscriber = tracing::Dispatch::new(log_subscriber(logs.clone()));
+    let request = worker_test_request();
+    let cancellation = CancellationToken::new();
+    let (progress, _) = watch::channel(DownloadProgress::default());
+    let operation = tracing::dispatcher::with_default(&subscriber, || {
+        client.run_attempt(&request, id, id, &cancellation, &progress)
+    });
+    assert!(operation.with_subscriber(subscriber).await.is_err());
+    let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert!(!text.contains("pending-secret-marker"));
+    assert!(!text.contains("sensitive.example"));
+    let events: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let rejection = events
+        .iter()
+        .find(|event| event["fields"]["event"] == "worker_dispatch_invalid")
+        .unwrap();
+    assert_eq!(rejection["fields"]["reason"], "invalid_response_body");
+}
+
+async fn worker_with_truncated_poll(body: String) -> Mock {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request_bytes = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let read = stream.read(&mut chunk).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            request_bytes.extend_from_slice(&chunk[..read]);
+            if let Some(end) = request_bytes
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+            {
+                request_bytes.truncate(end + 4);
+                break;
+            }
+        }
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len() + 20,
+            body
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+        let _ = stream.shutdown().await;
+    });
+    Mock {
+        origin,
+        requests,
+        task,
+    }
+}
+
+#[tokio::test]
+async fn truncated_worker_body_logs_fixed_reason_without_body_content() {
+    use tracing::instrument::WithSubscriber;
+
+    let id = Uuid::new_v4();
+    let worker = worker_with_truncated_poll(format!(
+        r#"{{"job_id":"{id}","private":"body-secret-marker"}}"#
+    ))
+    .await;
+    let controller = mock(vec![]).await;
+    let (client, _dir) = remote(&controller, &worker).await;
+    let logs = LogCapture::default();
+    let subscriber = tracing::Dispatch::new(log_subscriber(logs.clone()));
+    let operation = tracing::dispatcher::with_default(&subscriber, || client.worker_job(id));
+    let error = operation.with_subscriber(subscriber).await.unwrap_err();
+    assert_eq!(error.code, ErrorCode::Network);
+    assert!(!error.message.contains("body-secret-marker"));
+    let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert!(!text.contains("body-secret-marker"));
+    let events: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let rejection = events
+        .iter()
+        .find(|event| event["fields"]["event"] == "worker_job_poll_invalid")
+        .unwrap();
+    assert_eq!(rejection["fields"]["reason"], "invalid_response_body");
+}

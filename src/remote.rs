@@ -1587,12 +1587,40 @@ mod tests {
         }
     }
     fn log_subscriber(logs: LogCapture) -> impl tracing::Subscriber + Send + Sync {
+        // Keep a second dispatcher registered while a capture is active. With
+        // only one dispatcher, tracing's callsite cache can consult the default
+        // on an unrelated test thread and incorrectly disable the callsite.
+        static NOOP_DISPATCH: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+        NOOP_DISPATCH
+            .get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::new()));
         tracing_subscriber::fmt()
             .json()
             .with_ansi(false)
             .with_env_filter("youtube_extractor::remote=debug")
             .with_writer(logs)
             .finish()
+    }
+
+    #[test]
+    fn captured_events_survive_unsubscribed_callsite_registration() {
+        fn emit_event() {
+            tracing::warn!(event = "capture_registration_test", "Test capture");
+        }
+
+        let logs = LogCapture::default();
+        let subscriber = tracing::Dispatch::new(log_subscriber(logs.clone()));
+        // Register this callsite first on a thread without a scoped subscriber,
+        // while the capture subscriber is active on the test thread.
+        std::thread::spawn(emit_event).join().unwrap();
+        tracing::dispatcher::with_default(&subscriber, emit_event);
+        let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        let events: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(events
+            .iter()
+            .any(|event| event["fields"]["event"] == "capture_registration_test"));
     }
 
     #[tokio::test]

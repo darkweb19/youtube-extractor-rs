@@ -156,6 +156,49 @@ permissions first; Cloud Run IAM generally gates every request, but that
 observation alone is not conclusive. Never log or paste tokens, raw headers,
 controller response bodies or video URLs when collecting diagnostics.
 
+## Deploying the worker response contract fix
+
+`POST /api/v1/downloads` returns HTTP `202` with the same `JobView` JSON model
+used by `GET /api/v1/downloads/{id}`. Its `progress` contains
+`downloaded_bytes`, nullable `total_bytes`, and nullable `percent`; it does not
+contain the internal pipeline's `stage` field. Railway now decodes the shared
+model and derives its internal stage from the validated job state (`queued`,
+`running`, `completed`, `failed`, or `cancelled`). Both replies must contain the
+expected UUID, and malformed JSON, invalid field types, and unknown states fail
+validation. Railway copies byte counts directly, even when the total is unknown.
+
+1. Wait for the branch validation, GCP integration tests, and prebuilt worker
+   workflows to succeed for the intended `fix/rust-yt-bot` commit. In Railway,
+   select that branch/commit and deploy or redeploy the existing service using
+   its Dockerfile. Keep its persistent `/data` volume and one replica.
+2. Keep the existing remote-mode controller, worker, and Cloudflare Access
+   variables. No new variable, secret, Cloud Run controller deployment, VM
+   scheduling change, or tunnel change is required for this fix.
+3. An existing worker that returns the documented `JobView` contract does **not**
+   need redeployment: the fix is in Railway's response consumer. If refreshing
+   the worker independently, use the successful commit's prebuilt ZIP and the
+   installation procedure above; retain `/etc/youtube-extractor.env` and its
+   existing credentials.
+4. Verify Railway `/health`, then submit one download of media you are permitted
+   to retrieve. Confirm `worker_dispatch_response` reports `202`, followed by
+   `worker_dispatch_accepted`, expected state transitions, a completed local job,
+   and a file that can be retrieved and probed. Confirm the VM stops after the
+   configured idle interval. Also verify cancellation against a running job.
+
+An HTTP `200` in browser job-status polling only confirms that Railway served
+the poll. Inspect the returned job state and Railway's correlated `remote_job`
+logs to establish the worker's result. Contract failures use
+`worker_dispatch_invalid` or `worker_job_poll_invalid` with a fixed reason such
+as `invalid_response_body`, `invalid_uuid`, or `job_id_mismatch`. Logs include safe
+status/category metadata and the expected job ID; they exclude raw bodies,
+worker error text, private URLs, and credentials.
+
+The regression suite uses local HTTP worker fixtures serialized from `JobView`.
+It does not establish live Railway/GCP/Cloudflare or YouTube download success;
+the deployment checks above must run in the selected deployment to establish
+that. Roll back through Railway's deployment history if required, retaining the
+volume and configuration; the older consumer will still have the contract bug.
+
 ## Railway controller configuration
 
 Provision a separate Google Cloud Run VM controller implementing the contract

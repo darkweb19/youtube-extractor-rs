@@ -2,6 +2,13 @@
 
 Deploy this repository as its own Railway service. It does not need, or share code with, another application backend. `railway.toml` selects the Dockerfile, `/health`, bounded restart attempts and one replica. Deployment requires an explicitly chosen Railway project, environment and service with suitable credentials; repository configuration alone does not create or deploy those resources.
 
+For `EXTRACTOR_MODE=remote`, also read the [system architecture](architecture.md),
+[GCP/Cloudflare operations guide](gcp-cloudflare-operations.md) and
+[worker installation guide](../gcp-worker/README.md). The serving instance stays
+on Railway; extraction runs on the private Compute Engine worker. The Cloud Run
+lifecycle controller must be provisioned separately. These files describe a
+deployment design, not evidence that any particular cloud resource is configured.
+
 ## Railway setup
 
 1. Connect this repository to a new service in the intended Railway project/environment. Select its Dockerfile builder and the intended reviewed commit.
@@ -64,7 +71,7 @@ The active extractor is the managed yt-dlp subprocess. Select its binary using `
 | `YTDLP_PATH` | `yt-dlp` | Path to the yt-dlp executable (container sets `/usr/local/bin/yt-dlp`) |
 | `API_TOKEN` | required | Shared bearer token, at least 32 characters, no whitespace |
 | `ALLOW_UNAUTHENTICATED` | `false` | Explicit local development only, with no token configured |
-| `PORT` | `8080` | Listen port on all IPv4 interfaces |
+| `PORT` | `8080` | Listen port; `BIND_HOST` defaults to `0.0.0.0`, worker example uses `127.0.0.1` |
 | `DATA_DIR` | `data` (`/data` in image) | Job records, temporary media and completed outputs |
 | `WORKERS` | `2` | Concurrent background media jobs, range 1–64 |
 | `QUEUE_CAPACITY` | `16` | Bounded waiting queue, range 1–4096 |
@@ -88,7 +95,7 @@ Start with two CPU cores and 2 GiB memory for two workers, then measure actual c
 
 Enforce hard memory, CPU and process limits through Railway/container settings. FFmpeg's `-max_alloc` limits each allocation, not total process RAM, and a bounded Rust streaming buffer does not bound every codec allocation. Disk budget accounting excludes filesystem overhead and unrelated files, and FFmpeg's byte ceiling can overshoot slightly by an encoded packet. Keep free-space headroom and treat application limits as admission controls rather than operating-system quotas.
 
-Graceful termination stops accepting work, cancels in-flight work and cleans partial files. On restart, queued/running persisted records become failed with `DOWNLOAD_INTERRUPTED`; they are not automatically retried or resumed. Completed records and files survive when the same volume is retained. Expiration removes records and associated files after `JOB_TTL_SECS`. Persisted jobs do not imply resumable byte-range downloads. Test restart scenarios before relying on recovery for production operations. Retention is not backup: volume deletion or corruption can lose records and outputs. Back up important data using platform-supported mechanisms.
+Graceful termination stops accepting work, cancels in-flight work and cleans partial files. On restart, an unexpired queued record with its saved request can be requeued if recovery queue capacity permits. Running records and queued records that cannot replay become failed with `DOWNLOAD_INTERRUPTED`; interrupted extraction is not transparently resumed. Recovery also cleans cancelled or cleanup-pending records. Completed records and files survive when the same volume is retained. Expiration removes records and associated files after `JOB_TTL_SECS`. Persisted jobs do not imply resumable byte-range downloads. Test restart scenarios before relying on recovery for production operations. Retention is not backup: volume deletion or corruption can lose records and outputs. Back up important data using platform-supported mechanisms.
 
 Use JSON tracing, HTTP errors, job states, queue depth, completion latency, FFmpeg exit failures and disk utilization for operations. Do not log bearer tokens, signed source URLs or upstream page bodies. Keep application and platform logs together when distinguishing DNS, network policy, HTTP rate limiting, player changes and access restrictions.
 
@@ -96,4 +103,16 @@ For rollback, retain the last verified image/commit and the associated configura
 
 ## Railway-specific extraction limitations
 
-A healthy container and a successful local `rusty_ytdl` metadata test do not prove a Railway outbound IP is accepted by YouTube. Avoid repeated immediate retry loops if Railway gets an upstream sign-in/verification response. The Rust adapter reconstructs a canonical YouTube watch URL from a validated ID. No Google cookies or CAPTCHA handling are configured. `rusty_ytdl` performs metadata requests internally, so its metadata egress is not covered by `SafeHttpClient`; downloaded media URLs are validated by the Rust transfer client. Apply OS-level network controls and do not interpret an HTTP 429 as a parser regression.
+A healthy container and passing fixtures do not prove a Railway outbound IP is
+accepted by YouTube. The active yt-dlp adapter reconstructs a canonical watch URL
+from a validated ID, ignores local yt-dlp configuration, and runs without Google
+cookies or CAPTCHA handling. Its metadata and media requests are made by the
+subprocess, outside the retained native `SafeHttpClient` path. Apply deployment
+egress controls accordingly; do not claim that native-client URL validation covers
+yt-dlp traffic. Avoid immediate retry loops after sign-in/verification responses.
+
+Remote mode moves extraction to GCP and uses the worker's configured WARP SOCKS
+proxy. This does not establish authorization or guaranteed upstream access. A
+Cloudflare Tunnel protects the inbound worker route; it does not route YouTube
+traffic. Diagnose controller, Access/Tunnel, worker, WARP and upstream behavior
+separately using the [operations guide](gcp-cloudflare-operations.md).

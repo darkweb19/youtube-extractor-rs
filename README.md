@@ -208,6 +208,17 @@ The storage budget can reject admission before the queue fills. A remux usually 
 
 ## Development and verification
 
+The [offline eval suite](evals/README.md) scores extraction and remote transport
+scenarios against production Rust code, with per-case JSON results and optional
+baseline comparison:
+
+```bash
+python3 evals/run.py --out work/evals
+```
+
+It uses synthetic inputs and loopback workers, requires no cloud credentials, and
+does not establish live YouTube or deployed infrastructure compatibility.
+
 ```bash
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
@@ -247,6 +258,11 @@ Do not count the writable container layer as durable storage. Mount `/data`, ret
 
 To keep Railway always available but only pay for GCP while downloading, set
 `EXTRACTOR_MODE=remote` on Railway and follow [gcp-worker/README.md](gcp-worker/README.md).
+Read the [architecture](docs/architecture.md) and
+[GCP, Tunnel, Access and WARP operations guide](docs/gcp-cloudflare-operations.md)
+for the trust boundaries, lifecycle constraints, setup order and acceptance checks.
+Stopping Compute Engine avoids running compute charges; persistent disks and
+other provisioned resources can still incur charges while the VM is stopped.
 The same Rust binary is packaged by `gcp-worker/package.sh` and installed
 as a GCP-only service; this preserves the existing authenticated v1 API and
 UI. GCP uses `YTDLP_PROXY=socks5://127.0.0.1:40000`, while Railway starts

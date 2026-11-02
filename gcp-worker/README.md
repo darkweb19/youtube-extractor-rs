@@ -1,5 +1,10 @@
 # On-demand GCP extraction worker (Ubuntu 24.04)
 
+For the complete Railway → Cloud Run controller → Compute Engine architecture,
+see [architecture](../docs/architecture.md). For the setup sequence, independent
+Tunnel/Access ingress and WARP egress checks, credential boundaries and recovery,
+see [GCP/Cloudflare operations](../docs/gcp-cloudflare-operations.md).
+
 This directory is the **GCP deployment unit**. It packages the existing Rust/Axum
 service as a binary instead of maintaining a fork of its request parsing,
 job queue, cancellation, or file streaming code. GCP receives only the generated
@@ -275,7 +280,9 @@ Use the Google Cloud maximum-VM-runtime scheduling policy as the independent
 runaway-cost guard. The code uses a single-process lifecycle lock and therefore
 is **not** safe for multiple independent Railway replicas; a multi-replica
 deployment requires a distributed lease and durable dispatch attempts.
-Transient HTTP dispatch failures are retried with an idempotency key.
-Interrupted yt-dlp extractions are retried at most once by default; access
-restrictions, invalid requests, cancellations and exhausted queues are not
-repeated indefinitely.
+Transient HTTP dispatch transport failures are retried once with the same
+idempotency key. Worker `failed` states currently become `DOWNLOAD_INTERRUPTED`
+on Railway regardless of the worker's original error code, and can trigger a
+fresh extraction attempt up to `GCP_MAX_JOB_ATTEMPTS` (two by default). Direct
+queue rejection and cancellation are not retried as extraction failures. Do not
+interpret this bounded retry policy as precise classification of upstream causes.

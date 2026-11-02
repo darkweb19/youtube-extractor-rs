@@ -1,0 +1,369 @@
+[
+  {
+    "id": "url-watch-tracking",
+    "source": "src/extractor.rs::normalize_url; supported browser copy/share controls",
+    "scenario": {
+      "kind": "url",
+      "url": "https://www.youtube.com/watch?v=abcdefghijk&list=ignored&t=120"
+    },
+    "expect": {
+      "outcome": "success",
+      "contains": {
+        "id": "abcdefghijk"
+      }
+    }
+  },
+  {
+    "id": "url-short-share",
+    "source": "src/extractor.rs::normalize_url; supported browser copy/share controls",
+    "scenario": {
+      "kind": "url",
+      "url": "https://youtu.be/abcdefghijk?si=share-tracking"
+    },
+    "expect": {
+      "outcome": "success",
+      "contains": {
+        "id": "abcdefghijk"
+      }
+    }
+  },
+  {
+    "id": "url-mobile-shorts",
+    "source": "src/extractor.rs::normalize_url; supported browser copy/share controls",
+    "scenario": {
+      "kind": "url",
+      "url": "https://m.youtube.com/shorts/abcdefghijk"
+    },
+    "expect": {
+      "outcome": "success",
+      "contains": {
+        "id": "abcdefghijk"
+      }
+    }
+  },
+  {
+    "id": "url-live-replay",
+    "source": "src/extractor.rs::normalize_url; supported browser copy/share controls",
+    "scenario": {
+      "kind": "url",
+      "url": "https://www.youtube.com/live/abcdefghijk"
+    },
+    "expect": {
+      "outcome": "success",
+      "contains": {
+        "id": "abcdefghijk"
+      }
+    }
+  },
+  {
+    "id": "url-ambiguous-watch",
+    "source": "docs/api.md; reject ambiguous or untrusted upstream targets before process spawn",
+    "scenario": {
+      "kind": "url",
+      "url": "https://www.youtube.com/watch?v=abcdefghijk&v=zyxwvutsrqp"
+    },
+    "expect": {
+      "outcome": "error",
+      "code": "INVALID_REQUEST"
+    }
+  },
+  {
+    "id": "url-share-conflict",
+    "source": "docs/api.md; reject ambiguous or untrusted upstream targets before process spawn",
+    "scenario": {
+      "kind": "url",
+      "url": "https://youtu.be/abcdefghijk?v=zyxwvutsrqp"
+    },
+    "expect": {
+      "outcome": "error",
+      "code": "INVALID_REQUEST"
+    }
+  },
+  {
+    "id": "url-lookalike-host",
+    "source": "docs/api.md; reject ambiguous or untrusted upstream targets before process spawn",
+    "scenario": {
+      "kind": "url",
+      "url": "https://youtube.com.attacker.invalid/watch?v=abcdefghijk"
+    },
+    "expect": {
+      "outcome": "error",
+      "code": "INVALID_REQUEST"
+    }
+  },
+  {
+    "id": "url-encoded-path",
+    "source": "docs/api.md; reject ambiguous or untrusted upstream targets before process spawn",
+    "scenario": {
+      "kind": "url",
+      "url": "https://youtube.com/%77atch?v=abcdefghijk"
+    },
+    "expect": {
+      "outcome": "error",
+      "code": "INVALID_REQUEST"
+    }
+  },
+  {
+    "id": "url-local-target",
+    "source": "docs/api.md; reject ambiguous or untrusted upstream targets before process spawn",
+    "scenario": {
+      "kind": "url",
+      "url": "https://127.0.0.1/watch?v=abcdefghijk"
+    },
+    "expect": {
+      "outcome": "error",
+      "code": "INVALID_REQUEST"
+    }
+  },
+  {
+    "id": "url-userinfo",
+    "source": "docs/api.md; reject ambiguous or untrusted upstream targets before process spawn",
+    "scenario": {
+      "kind": "url",
+      "url": "https://youtube.com@attacker.invalid/watch?v=abcdefghijk"
+    },
+    "expect": {
+      "outcome": "error",
+      "code": "INVALID_REQUEST"
+    }
+  },
+  {
+    "id": "request-video-cap",
+    "source": "README.md API MP4 workflow; preserve a supported quality ceiling",
+    "scenario": {
+      "kind": "request",
+      "request": {
+        "url": "https://youtu.be/abcdefghijk",
+        "type": "video",
+        "format": "mp4",
+        "quality": "720p"
+      }
+    },
+    "expect": {
+      "outcome": "success",
+      "contains": {
+        "id": "abcdefghijk",
+        "request": {
+          "type": "video",
+          "format": "mp4",
+          "quality": "720p"
+        }
+      }
+    }
+  },
+  {
+    "id": "request-audio-bitrate",
+    "source": "docs/api.md; accepted audio conversion request",
+    "scenario": {
+      "kind": "request",
+      "request": {
+        "url": "https://youtu.be/abcdefghijk",
+        "type": "audio",
+        "format": "mp3",
+        "quality": "best",
+        "audio_bitrate_kbps": 192
+      }
+    },
+    "expect": {
+      "outcome": "success",
+      "contains": {
+        "id": "abcdefghijk",
+        "request": {
+          "type": "audio",
+          "format": "mp3",
+          "audio_bitrate_kbps": 192
+        }
+      }
+    }
+  },
+  {
+    "id": "request-type-format-conflict",
+    "source": "src/model.rs and src/extractor.rs; reject invalid work at the shared request boundary",
+    "scenario": {
+      "kind": "request",
+      "request": {
+        "url": "https://youtu.be/abcdefghijk",
+        "type": "video",
+        "format": "mp3",
+        "quality": "720p"
+      }
+    },
+    "expect": {
+      "outcome": "error",
+      "code": "INVALID_REQUEST"
+    }
+  },
+  {
+    "id": "request-unknown-callback",
+    "source": "src/model.rs and src/extractor.rs; reject invalid work at the shared request boundary",
+    "scenario": {
+      "kind": "request",
+      "request": {
+        "url": "https://youtu.be/abcdefghijk",
+        "type": "video",
+        "format": "mp4",
+        "quality": "720p",
+        "callback_url": "http://127.0.0.1/private"
+      }
+    },
+    "expect": {
+      "outcome": "error",
+      "code": "INVALID_REQUEST"
+    }
+  },
+  {
+    "id": "request-audio-height",
+    "source": "src/model.rs and src/extractor.rs; reject invalid work at the shared request boundary",
+    "scenario": {
+      "kind": "request",
+      "request": {
+        "url": "https://youtu.be/abcdefghijk",
+        "type": "audio",
+        "format": "mp3",
+        "quality": "720p",
+        "audio_bitrate_kbps": 192
+      }
+    },
+    "expect": {
+      "outcome": "error",
+      "code": "INVALID_REQUEST"
+    }
+  },
+  {
+    "id": "request-bitrate-over-budget",
+    "source": "src/model.rs and src/extractor.rs; reject invalid work at the shared request boundary",
+    "scenario": {
+      "kind": "request",
+      "request": {
+        "url": "https://youtu.be/abcdefghijk",
+        "type": "audio",
+        "format": "mp3",
+        "quality": "best",
+        "audio_bitrate_kbps": 321
+      }
+    },
+    "expect": {
+      "outcome": "error",
+      "code": "INVALID_REQUEST"
+    }
+  },
+  {
+    "id": "request-ambiguous-input",
+    "source": "src/model.rs and src/extractor.rs; reject invalid work at the shared request boundary",
+    "scenario": {
+      "kind": "request",
+      "request": {
+        "url": "https://youtu.be/abcdefghijk?v=zyxwvutsrqp",
+        "type": "video",
+        "format": "mp4",
+        "quality": "720p"
+      }
+    },
+    "expect": {
+      "outcome": "error",
+      "code": "INVALID_REQUEST"
+    }
+  },
+  {
+    "id": "metadata-adaptive-private",
+    "source": "src/ytdlp.rs active metadata adapter; adaptive streams normalize and signed URLs stay private",
+    "scenario": {
+      "kind": "metadata",
+      "url": "https://youtu.be/abcdefghijk?si=ignored",
+      "stdout": "{\"id\": \"abcdefghijk\", \"title\": \"Synthetic training clip\", \"duration\": 42.75, \"channel\": \"Synthetic creator\", \"formats\": [{\"format_id\": \"136\", \"ext\": \"mp4\", \"vcodec\": \"avc1.4d401f\", \"acodec\": \"none\", \"height\": 720, \"url\": \"https://media.example.invalid/?private-signed-sentinel\"}, {\"format_id\": \"140-20\", \"ext\": \"m4a\", \"vcodec\": \"none\", \"acodec\": \"mp4a.40.2\", \"url\": \"https://media.example.invalid/?private-signed-sentinel\"}, {\"format_id\": \"storyboard\", \"ext\": \"mhtml\", \"vcodec\": \"none\", \"acodec\": \"none\"}]}"
+    },
+    "expect": {
+      "outcome": "success",
+      "contains": {
+        "id": "abcdefghijk",
+        "title": "Synthetic training clip",
+        "duration_seconds": 42,
+        "formats": [
+          {
+            "itag": 136,
+            "container": "mp4",
+            "has_audio": false,
+            "has_video": true
+          },
+          {
+            "itag": 140,
+            "container": "m4a",
+            "has_audio": true,
+            "has_video": false
+          }
+        ]
+      }
+    }
+  },
+  {
+    "id": "metadata-empty-formats",
+    "source": "src/ytdlp.rs; metadata without playable formats remains metadata, not completed media",
+    "scenario": {
+      "kind": "metadata",
+      "url": "https://youtube.com/watch?v=abcdefghijk",
+      "stdout": "{\"id\": \"abcdefghijk\", \"title\": \"Unavailable formats\", \"formats\": []}"
+    },
+    "expect": {
+      "outcome": "success",
+      "contains": {
+        "id": "abcdefghijk",
+        "formats": []
+      }
+    }
+  },
+  {
+    "id": "metadata-mismatched-video",
+    "source": "src/ytdlp.rs; subprocess metadata must match requested video and errors omit upstream text",
+    "scenario": {
+      "kind": "metadata",
+      "url": "https://youtu.be/abcdefghijk",
+      "stdout": "{\"id\": \"zyxwvutsrqp\", \"title\": \"Synthetic training clip\", \"duration\": 42.75, \"channel\": \"Synthetic creator\", \"formats\": [{\"format_id\": \"136\", \"ext\": \"mp4\", \"vcodec\": \"avc1.4d401f\", \"acodec\": \"none\", \"height\": 720, \"url\": \"https://media.example.invalid/?private-signed-sentinel\"}, {\"format_id\": \"140-20\", \"ext\": \"m4a\", \"vcodec\": \"none\", \"acodec\": \"mp4a.40.2\", \"url\": \"https://media.example.invalid/?private-signed-sentinel\"}, {\"format_id\": \"storyboard\", \"ext\": \"mhtml\", \"vcodec\": \"none\", \"acodec\": \"none\"}]}",
+      "exit_code": 0
+    },
+    "expect": {
+      "outcome": "error",
+      "code": "PLAYER_CHANGED"
+    }
+  },
+  {
+    "id": "metadata-malformed-response",
+    "source": "src/ytdlp.rs; subprocess metadata must match requested video and errors omit upstream text",
+    "scenario": {
+      "kind": "metadata",
+      "url": "https://youtu.be/abcdefghijk",
+      "stdout": "<html>private-signed-sentinel</html>",
+      "exit_code": 0
+    },
+    "expect": {
+      "outcome": "error",
+      "code": "PLAYER_CHANGED"
+    }
+  },
+  {
+    "id": "metadata-upstream-restriction",
+    "source": "src/ytdlp.rs; subprocess metadata must match requested video and errors omit upstream text",
+    "scenario": {
+      "kind": "metadata",
+      "url": "https://youtu.be/abcdefghijk",
+      "stdout": "private-signed-sentinel",
+      "exit_code": 1
+    },
+    "expect": {
+      "outcome": "error",
+      "code": "ACCESS_RESTRICTED"
+    }
+  },
+  {
+    "id": "metadata-invalid-target",
+    "source": "src/ytdlp.rs::Extractor; invalid destinations must fail before subprocess invocation",
+    "scenario": {
+      "kind": "metadata",
+      "url": "https://127.0.0.1/private",
+      "stdout": "{\"id\": \"abcdefghijk\", \"title\": \"Synthetic training clip\", \"duration\": 42.75, \"channel\": \"Synthetic creator\", \"formats\": [{\"format_id\": \"136\", \"ext\": \"mp4\", \"vcodec\": \"avc1.4d401f\", \"acodec\": \"none\", \"height\": 720, \"url\": \"https://media.example.invalid/?private-signed-sentinel\"}, {\"format_id\": \"140-20\", \"ext\": \"m4a\", \"vcodec\": \"none\", \"acodec\": \"mp4a.40.2\", \"url\": \"https://media.example.invalid/?private-signed-sentinel\"}, {\"format_id\": \"storyboard\", \"ext\": \"mhtml\", \"vcodec\": \"none\", \"acodec\": \"none\"}]}"
+    },
+    "expect": {
+      "outcome": "error",
+      "code": "INVALID_REQUEST"
+    }
+  }
+]

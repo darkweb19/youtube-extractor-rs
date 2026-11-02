@@ -1,4 +1,8 @@
 /target/
+/node_modules/
+/work/
+/evals/runs/
+__pycache__/
 /.env
 /.env.*
 !/.env.example

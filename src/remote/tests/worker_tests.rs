@@ -5,6 +5,263 @@ use super::*;
 
 use crate::model::{JobError, JobProgress};
 
+#[tokio::test]
+async fn eval_worker_redirects_do_not_forward_access_or_bearer_credentials() {
+    let destination = mock(vec![]).await;
+    let redirects = [
+        StatusCode::FOUND,
+        StatusCode::TEMPORARY_REDIRECT,
+        StatusCode::PERMANENT_REDIRECT,
+    ]
+    .into_iter()
+    .map(|status| {
+        let mut reply = Reply::new(status, "");
+        reply.location = Some(destination.origin.join("capture").unwrap().to_string());
+        reply
+    })
+    .collect();
+    let controller = mock(vec![]).await;
+    let worker = mock(redirects).await;
+    let (client, _dir) = remote(&controller, &worker).await;
+
+    assert!(!client.worker_ready().await);
+    assert_eq!(
+        client.worker_job(Uuid::new_v4()).await.unwrap_err().code,
+        ErrorCode::Network
+    );
+    let local_id = Uuid::new_v4();
+    let error = client
+        .retrieve(
+            local_id,
+            Uuid::new_v4(),
+            &worker_test_output("result.mp3", 7),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Network);
+    assert!(!client.storage.job_dir(local_id).exists());
+    assert!(destination.requests.lock().unwrap().is_empty());
+    assert!(controller.requests.lock().unwrap().is_empty());
+    let requests = worker.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    for request in requests.iter() {
+        assert_eq!(
+            request.headers["Authorization"],
+            format!("Bearer {WORKER_TOKEN}")
+        );
+        assert_eq!(request.headers["CF-Access-Client-Id"], "test-access-id");
+        assert_eq!(
+            request.headers["CF-Access-Client-Secret"],
+            "test-access-secret"
+        );
+        assert!(!request.headers.contains_key("X-Controller-Token"));
+    }
+}
+
+#[tokio::test]
+async fn eval_chunked_copy_rejects_short_and_oversized_files_without_publishing() {
+    for (body, expected_size, expected_code) in [
+        ("short", 7, ErrorCode::Network),
+        ("too many bytes", 7, ErrorCode::DownloadTooLarge),
+    ] {
+        let local_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4();
+        let queued = worker_test_view(worker_id, JobState::Queued, 0, None, None);
+        let completed = worker_test_view(
+            worker_id,
+            JobState::Completed,
+            expected_size,
+            Some(expected_size),
+            Some(worker_test_output("result.mp3", expected_size)),
+        );
+        let mut media = Reply::new(StatusCode::OK, body);
+        media.streamed = true;
+        let controller = mock(vec![]).await;
+        let worker = mock(vec![
+            worker_test_reply(StatusCode::ACCEPTED, &queued),
+            worker_test_reply(StatusCode::OK, &completed),
+            media,
+            Reply::new(StatusCode::NO_CONTENT, ""),
+        ])
+        .await;
+        let (client, _dir) = remote(&controller, &worker).await;
+        let (progress, _) = watch::channel(DownloadProgress::default());
+        let error = client
+            .run_attempt(
+                &worker_test_request(),
+                local_id,
+                worker_id,
+                &CancellationToken::new(),
+                &progress,
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, expected_code);
+        assert!(!client.storage.job_dir(local_id).exists());
+        let requests = worker.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(
+            requests[2].path,
+            format!("/api/v1/downloads/{worker_id}/file")
+        );
+        assert_eq!(requests[3].method, Method::DELETE);
+        assert_eq!(requests[3].path, format!("/api/v1/downloads/{worker_id}"));
+    }
+}
+
+#[tokio::test]
+async fn eval_cancel_streamed_copy_cleans_local_and_worker_state() {
+    let local_id = Uuid::new_v4();
+    let worker_id = Uuid::new_v4();
+    let stream_pending = Arc::new(tokio::sync::Notify::new());
+    let stream_signal = stream_pending.clone();
+    let requests = Arc::new(StdMutex::new(Vec::<RequestLog>::new()));
+    let request_log = requests.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+    let app = Router::new().fallback(move |request: Request| {
+        let stream_signal = stream_signal.clone();
+        let request_log = request_log.clone();
+        async move {
+            request_log.lock().unwrap().push(RequestLog {
+                method: request.method().clone(),
+                path: request.uri().path().into(),
+                headers: request.headers().clone(),
+            });
+            if request.method() == Method::DELETE {
+                return Response::builder()
+                    .status(StatusCode::NO_CONTENT)
+                    .body(Body::empty())
+                    .unwrap();
+            }
+            if request.uri().path().ends_with("/file") {
+                let stream = futures_util::stream::unfold(
+                    (false, stream_signal),
+                    |(sent, signal)| async move {
+                        if sent {
+                            signal.notify_one();
+                            std::future::pending::<()>().await;
+                        }
+                        Some((
+                            Ok::<_, std::convert::Infallible>(bytes::Bytes::from_static(b"part")),
+                            (true, signal),
+                        ))
+                    },
+                );
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Body::from_stream(stream))
+                    .unwrap();
+            }
+            let (status, view) = if request.method() == Method::POST {
+                (
+                    StatusCode::ACCEPTED,
+                    worker_test_view(worker_id, JobState::Queued, 0, None, None),
+                )
+            } else {
+                (
+                    StatusCode::OK,
+                    worker_test_view(
+                        worker_id,
+                        JobState::Completed,
+                        7,
+                        Some(7),
+                        Some(worker_test_output("result.mp3", 7)),
+                    ),
+                )
+            };
+            Response::builder()
+                .status(status)
+                .body(Body::from(serde_json::to_vec(&view).unwrap()))
+                .unwrap()
+        }
+    });
+    let worker = Mock {
+        origin,
+        requests,
+        task: tokio::spawn(async move { axum::serve(listener, app).await.unwrap() }),
+    };
+    let controller = mock(vec![]).await;
+    let (client, _dir) = remote(&controller, &worker).await;
+    let cancellation = CancellationToken::new();
+    let (progress, _) = watch::channel(DownloadProgress::default());
+    let request = worker_test_request();
+    let cancel_after_body_started = async {
+        stream_pending.notified().await;
+        cancellation.cancel();
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::join!(
+            client.run_attempt(&request, local_id, worker_id, &cancellation, &progress),
+            cancel_after_body_started,
+        )
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(result.unwrap_err().code, ErrorCode::Cancelled);
+    assert!(!client.storage.job_dir(local_id).exists());
+    let requests = worker.requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    assert!(requests[2].path.ends_with("/file"));
+    assert_eq!(requests[3].method, Method::DELETE);
+    assert_eq!(requests[3].path, format!("/api/v1/downloads/{worker_id}"));
+}
+
+#[tokio::test]
+async fn eval_suspended_vm_fails_startup_without_dispatch_or_start() {
+    for state in ["SUSPENDING", "SUSPENDED"] {
+        let controller = mock(vec![Reply::state(state)]).await;
+        let worker = mock(vec![]).await;
+        let (client, _dir) = remote(&controller, &worker).await;
+        let (progress, _) = watch::channel(DownloadProgress::default());
+        let error = client
+            .run(
+                &worker_test_request(),
+                Uuid::new_v4(),
+                CancellationToken::new(),
+                progress,
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::Network);
+        assert_eq!(client.active.load(Ordering::SeqCst), 0);
+        assert!(client.lifecycle.try_lock().is_ok());
+        assert!(worker.requests.lock().unwrap().is_empty());
+        let requests = controller.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/status");
+    }
+}
+
+#[tokio::test]
+async fn eval_idle_nonrunning_vm_never_checks_worker_or_requests_stop() {
+    for state in [
+        "PROVISIONING",
+        "STAGING",
+        "STOPPING",
+        "SUSPENDING",
+        "SUSPENDED",
+        "REPAIRING",
+        "TERMINATED",
+    ] {
+        let controller = mock(vec![Reply::state(state)]).await;
+        let worker = mock(vec![]).await;
+        let (client, _dir) = remote(&controller, &worker).await;
+        expire_idle(&client);
+        client.stop_if_idle().await.unwrap();
+
+        assert!(worker.requests.lock().unwrap().is_empty());
+        let requests = controller.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "state: {state}");
+        assert_eq!(requests[0].path, "/status");
+        assert_eq!(requests[0].method, Method::GET);
+    }
+}
+
 fn worker_test_view(
     id: Uuid,
     status: JobState,

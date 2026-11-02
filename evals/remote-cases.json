@@ -1,0 +1,27 @@
+[
+  {
+    "id": "worker-redirects-do-not-forward-access-or-bearer-credentials",
+    "test": "remote::tests::worker_tests::eval_worker_redirects_do_not_forward_access_or_bearer_credentials",
+    "source": "gcp-worker/README.md and src/remote.rs; worker trust, bounded transfer and VM lifecycle contracts"
+  },
+  {
+    "id": "chunked-copy-rejects-short-and-oversized-files-without-publishing",
+    "test": "remote::tests::worker_tests::eval_chunked_copy_rejects_short_and_oversized_files_without_publishing",
+    "source": "gcp-worker/README.md and src/remote.rs; worker trust, bounded transfer and VM lifecycle contracts"
+  },
+  {
+    "id": "cancel-streamed-copy-cleans-local-and-worker-state",
+    "test": "remote::tests::worker_tests::eval_cancel_streamed_copy_cleans_local_and_worker_state",
+    "source": "gcp-worker/README.md and src/remote.rs; worker trust, bounded transfer and VM lifecycle contracts"
+  },
+  {
+    "id": "suspended-vm-fails-startup-without-dispatch-or-start",
+    "test": "remote::tests::worker_tests::eval_suspended_vm_fails_startup_without_dispatch_or_start",
+    "source": "gcp-worker/README.md and src/remote.rs; worker trust, bounded transfer and VM lifecycle contracts"
+  },
+  {
+    "id": "idle-nonrunning-vm-never-checks-worker-or-requests-stop",
+    "test": "remote::tests::worker_tests::eval_idle_nonrunning_vm_never_checks_worker_or_requests_stop",
+    "source": "gcp-worker/README.md and src/remote.rs; worker trust, bounded transfer and VM lifecycle contracts"
+  }
+]

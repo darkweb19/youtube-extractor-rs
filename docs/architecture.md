@@ -1,145 +1,239 @@
-# Architecture and operational assumptions
+# Architecture: local extraction and an on-demand GCP worker
 
-This branch runs one Rust/Axum service. `rusty_ytdl` discovers public YouTube
-metadata and direct stream URLs; the original Rust `DownloadPipeline` handles
-bounded HTTP transfers, retries, cancellation and FFmpeg on local files.
-Rust also owns bearer authentication, URL normalization, job admission/queue,
-storage, and authenticated completed-file delivery. The earlier bespoke
-parser is retained for regression tests, but Python yt-dlp and Deno are not in
-the active execution path.
+This branch has two execution modes selected in [`src/main.rs`](../src/main.rs).
+`EXTRACTOR_MODE=local` runs the managed yt-dlp adapter in the API process's host.
+`EXTRACTOR_MODE=remote` keeps the browser UI, public API, job records and completed
+files on Railway, and delegates extraction to the same Rust binary on a Compute
+Engine VM. The default is local mode. The active extractor is
+[`src/ytdlp.rs`](../src/ytdlp.rs), with yt-dlp 2026.10.21, its packaged EJS scripts,
+Node.js and FFmpeg. The native player parser and Rust transfer pipeline remain
+available to regression tests; `rusty_ytdl` is not the production backend.
 
-## Workload and reliability assumptions
+This document describes repository behavior and the infrastructure contract. It
+does not establish that a Cloud Run controller, VM, tunnel, WARP registration or
+Railway deployment is currently configured or healthy. The repository ships the
+worker installer and controller client, **not a Cloud Run controller service or
+GCP/Cloudflare infrastructure provisioning**. Use the
+[GCP and Cloudflare operations guide](gcp-cloudflare-operations.md) for setup and
+verification, and the [worker guide](../gcp-worker/README.md) for bundle installation.
 
-The initial service trusts one owning application represented by a shared bearer
-token. All authenticated callers can inspect and cancel all jobs. It is not a
-shared multi-tenant API: tenant isolation requires separate credentials,
-ownership checks, and storage partitioning before exposing it to unrelated users.
-Public media is the intended content tier. API credentials, signed upstream
-URLs, and private job metadata are internal data and must not enter responses or
-logs. The caller remains responsible for authorization to download each video.
-
-There is no measured read/write ratio or one-year p99 QPS forecast yet. Metadata
-lookups run synchronously; downloads are asynchronous. The initial limits are
-two concurrent media jobs, sixteen queued jobs, 256 retained job records, one GiB
-per job for combined source and output files, eight GiB total storage, and 120
-API requests per minute. Admission reserves one full job budget for each queued
-or running job and counts actual completed output sizes; storage capacity may
-therefore reject admission before the queue reaches sixteen. These are conservative
-starting resource budgets, not measured capacity commitments. Polling creates
-reads in proportion to job duration and client interval. Start with five-second
-polling and back off when queued.
-
-The provisional control-plane latency targets are p50 20 ms, p95 80 ms, and p99
-200 ms for authentication, job submission, and status responses, excluding
-metadata network access, media transfer, filesystem stalls, and FFmpeg. The
-availability objective is 99.9% per calendar month for the authenticated local
-API. These targets are unverified until deployment measurements exist. The
-service owner is the provisional error-budget consumer; a named human owner and
-traffic forecast must be assigned before a contractual SLO is approved.
-
-RPO depends on the persistent volume and its backup schedule; no zero-loss
-claim is made. An initial RTO target is 30 minutes after restoring the image and
-volume. Owner approval, a backup policy, and a restore exercise are outstanding.
-The container filesystem is never considered durable. Railway must mount a
-persistent volume at `DATA_DIR` if job records or completed files must survive
-restarts. Volume loss without a backup loses those records and files. Local
-storage requires a single replica per volume; independent replicas do not share
-the in-process queue. A shared database/queue and object storage are necessary
-before horizontally scaling one shared job namespace.
-
-## Boundaries
-
-| Module | Responsibility |
-| --- | --- |
-| `api` | Versioned HTTP contract, authentication, request validation and limits, file delivery |
-| `config` | Startup validation of secrets, timeouts, concurrency and retention budgets |
-| `error` | Stable machine error codes and JSON error responses |
-| `model` | Public metadata, requests, formats, and job response types |
-| `extractor` | URL normalization; legacy native parser retained for fixtures |
-| `network` | Validates media hosts/IPs, redirects, DNS and bounded outbound transfers |
-| `download` | Production format selection, streamed transfers, retries and progress |
-| `media` | Bounded local FFmpeg conversion/merge and FFprobe validation |
-| `ytdlp` | Managed yt-dlp subprocess for sanitized metadata and cancellable media downloading |
-| `storage` | Managed local paths, completed output, cleanup and durable local records |
-| `jobs` | Admission, bounded execution, state transitions, cancellation and retention |
-
-The common `Extractor` trait keeps metadata independent from the Axum API.
-`rusty_extractor` normalizes URLs to a validated 11-character video ID, invokes
-`rusty_ytdl` for public metadata, rejects unsupported manifests and unsafe media
-URLs, and redacts signed stream URLs from API serialization. The production
-Rust downloader uses the existing `SafeHttpClient` destination validation.
-The crate's metadata-fetching requests are internal to `rusty_ytdl`; their egress
-controls require independent review. No attempt is made to bypass sign-in or
-automated-access challenges.
+## Deployment and network paths
 
 ```mermaid
 flowchart LR
-  Client -->|Bearer token| API[Axum API]
-  API -->|metadata| Extractor[yt-dlp adapter]
-  API -->|submit/status/cancel| Jobs[Rust job manager]
-  Jobs --> Extractor
-  Jobs --> Transfer[yt-dlp media download]
-  Transfer -->|local files| FFMPEG[FFmpeg processing]
-  FFMPEG --> Storage[Local storage]
-  API -->|authorized download| Storage
+  User[Trusted browser or API client] -->|HTTPS and public API bearer| Railway[Railway: Axum and JobManager]
+  Railway --> Disk[(Railway persistent DATA_DIR)]
+  Railway -->|HTTPS: X-Controller-Token| Controller[Separately deployed Cloud Run controller]
+  Controller -->|Attached service identity: get/start/stop| VM[One Compute Engine VM]
+  Railway -->|HTTPS: Access service token and worker bearer| Access[Cloudflare Access]
+  Access --> Edge[Cloudflare Tunnel edge]
+  Tunnel[cloudflared on VM] -->|Outbound tunnel connection| Edge
+  Tunnel -->|Loopback HTTP :8080| Worker[Same Rust binary: local mode]
+  Worker --> Temp[(VM persistent workspace)]
+  Worker --> YTDLP[yt-dlp and FFmpeg]
+  YTDLP -->|SOCKS5 loopback :40000| WARP[WARP proxy on VM]
+  WARP -->|Outbound media traffic| YouTube[YouTube and media hosts]
+  Worker -->|Completed file through tunnel| Railway
 ```
 
-## Job and resource lifecycle
+The VM contains the worker, `cloudflared` and `warp-svc`; the arrows show
+connections, not a requirement for inbound connections to the VM. These are
+three separate paths:
 
-Requests are validated before queue admission. A full queue returns a structured
-backpressure error instead of growing memory. Jobs transition from queued to
-running and then to completed, failed, or cancelled. Terminal jobs have a finite
-retention period. Cancellation propagates to network transfers and child
-processes; partial files are removed. Completed files are served using streaming
-bodies rather than loading the artifact in memory. File names are derived from
-server-generated job identifiers, never supplied as filesystem paths by callers.
+| Path | Purpose | Authentication and exposure |
+| --- | --- | --- |
+| Railway → Cloud Run → Compute Engine | Inspect and change the power state of one configured VM | Application `X-Controller-Token`; Cloud Run's attached service identity calls Compute Engine |
+| Railway → Cloudflare Access/Tunnel → worker | Health, metadata, dispatch, progress, file transfer and cancellation | `CF-Access-Client-Id` / `CF-Access-Client-Secret` at the edge; a separate `Authorization: Bearer` token at the worker API |
+| yt-dlp → local WARP SOCKS proxy → YouTube | Worker outbound extraction traffic | Operator-managed WARP registration; no caller-supplied proxy or YouTube cookies |
 
-The byte budget, timeouts, worker count, retention count and queue capacity must
-be tuned together. Budget disk for retained outputs and active source files;
-muxing can temporarily require both source streams and an output artifact.
-FFmpeg threads and codecs can consume significant CPU even when network buffers
-are bounded. Request limits do not replace the background worker limit.
+Cloudflare Tunnel provides inbound application reachability through an outbound
+connector. WARP provides the configured outbound proxy for yt-dlp. Installing
+one does not configure or authenticate the other. The worker template binds
+`127.0.0.1:8080`; WARP proxy mode listens at `127.0.0.1:40000`. Neither port should
+be exposed by a GCP VPC firewall or public container port mapping. The stable
+worker hostname must be protected by Access, including `/health` and all API
+paths. Tunnel connectivity alone is not an authorization policy.
 
-Graceful shutdown stops admissions and cancels active work before process exit.
-After restart, interrupted jobs must become terminal with an honest interruption
-error; replaying extraction without caller awareness could duplicate work. The
-operational docs and implementation tests define the exact persistence behavior.
-Optional S3-compatible completed-output storage is a future extension unless an
-adapter and signed delivery have been implemented and tested. Its configuration
-must not falsely imply support merely because environment variables exist.
+In local mode there is no controller or worker HTTP hop. The API submits to a
+local `YtDlp` executor, which downloads, merges/converts and probes files on the
+same host. The production Dockerfile does not install or configure WARP. It is
+not evidence that Railway's direct YouTube egress works. The legacy
+`SafeHttpClient` host/DNS checks do not wrap yt-dlp's own socket requests;
+production yt-dlp egress relies on its configured proxy and infrastructure policy.
 
-## Security and protocol limits
+## Identity and trust boundaries
 
-Only supported YouTube URL shapes are accepted as user destinations. Upstream
-media must use approved HTTPS domains. DNS answers and redirect destinations
-require validation; private and special-purpose addresses are rejected. Redirects
-must not silently route a signed URL to arbitrary hosts. No user cookies or
-upstream authentication secrets are accepted. FFmpeg only receives local media
-paths and constrained arguments.
+The service is a trusted single-operator tool. Its shared public `API_TOKEN`
+grants access to all jobs and files; the browser keeps it in tab memory. There
+is no tenant ownership boundary between holders of that token. Keep these
+credentials distinct:
 
-Direct accessible streams are the first supported path. Signature-ciphered
-streams, throttling transforms, DRM, live manifests, authenticated videos, and
-challenged responses require explicit supported handling or typed unsupported /
-access-restricted errors. There is no extraction library fallback. A watch page
-that loads is not evidence that its media URL is usable from Railway.
+| Credential | Stored by | Sent to |
+| --- | --- | --- |
+| Public `API_TOKEN` | Railway and authorized clients | Railway `/api/v1` routes |
+| `GCP_CONTROLLER_TOKEN` | Railway and controller secret configuration | Controller only, as `X-Controller-Token` |
+| `GCP_WORKER_TOKEN` / worker `API_TOKEN` | Railway / VM root-owned environment file | Worker bearer-protected routes |
+| Cloudflare Access service token | Railway / Cloudflare Access policy | Worker hostname only |
+| Cloudflare Tunnel credential | VM connector configuration | Cloudflare tunnel service |
+| WARP registration | VM client state | WARP service |
+| Cloud Run runtime service identity | GCP | Compute Engine API; no private key on Railway |
 
-Error codes distinguish DNS/network failure, platform access restriction,
-upstream rate limiting, player changes, unsupported formats, expired URLs,
-interrupted transfers, byte-limit violations, timeouts, and FFmpeg failure.
-Never log full upstream response bodies, bearer headers, or signed URLs.
+The controller must authenticate its application token before any VM operation,
+bind the project/zone/instance in its own configuration, and reject attempts to
+select arbitrary targets. Its attached runtime service account needs narrowly
+scoped `compute.instances.get`, `compute.instances.start` and
+`compute.instances.stop`. Railway sends no Google IAM identity token: Cloud Run
+invocation/ingress settings must permit this request path while the controller
+still enforces its own authentication. A default Cloud Run service requiring an
+IAM identity token will reject this client. Cloud Run invoker permission and
+Compute Engine runtime permissions are separate controls.
 
-## Verification and release gates
+[`src/remote.rs`](../src/remote.rs) validates configured controller and worker
+URLs as HTTPS origins, rejects redirects, and uses fixed relative routes. Worker
+credentials do not accompany controller requests, and controller credentials do
+not accompany worker requests. Controller bodies are untrusted and its status
+body is capped at 16 KiB. Worker replies use the shared `JobView` model: dispatch
+and status must identify the expected UUID and contain known typed states. The
+consumer does not use a returned download URL or path to choose its destination;
+it constructs the authenticated file route and publishes under local UUID paths.
+Never log secrets, raw upstream bodies or signed media URLs.
 
-Deterministic tests use controlled HTTP/media fixtures for parser changes,
-format selection, transfer interruption, byte caps, queue saturation,
-cancellation, restart recovery, API errors, and FFmpeg output. External YouTube
-tests are opt-in and must use authorized media. Successful fixtures do not prove
-current YouTube compatibility.
+## Controller and worker contracts
 
-A production release additionally requires a built container, an authenticated
-runtime smoke test, and authorized metadata plus actual audio/video download
-tests from Railway. Datacenter IP restrictions are an external risk: using Rust
-does not fix them. Return a clear restriction if access is denied; do not rotate
-proxies, bypass CAPTCHA, inject stolen cookies, or circumvent DRM. Record what
-was actually tested in the verification report and retain unperformed checks as
-explicit release gaps.
+Every controller request carries `X-Controller-Token`:
+
+| Method/path | Required response | Meaning |
+| --- | --- | --- |
+| `GET /status` | `200`, JSON such as `{"status":"RUNNING"}` | Current Compute Engine state |
+| `POST /start` | `200` or `202`; `409` for a transient conflict | Already running or start accepted; not application readiness |
+| `POST /stop` | `200` or `202`; `409` for a transient conflict | Already stopped or stop accepted |
+
+Lifecycle response bodies are not required. State parsing recognizes
+`PROVISIONING`, `STAGING`, `RUNNING`, `STOPPING`, `SUSPENDING`, `SUSPENDED`,
+`REPAIRING` and `TERMINATED`. Readiness can start a `TERMINATED` VM, wait through
+`STOPPING`, `STAGING`, `PROVISIONING` or `REPAIRING`, and probe a `RUNNING` VM.
+Suspended/suspending states are recognized but cannot serve this startup flow;
+this design uses stop/start, not suspend/resume. Unexpected HTTP statuses,
+unknown states and malformed replies fail the operation.
+
+Worker dispatch is `POST /api/v1/downloads` with `X-Idempotency-Key` set to the
+worker UUID. Its normal response is `202` with the same `JobView` shape returned
+by `GET /api/v1/downloads/{id}`. `progress` has `downloaded_bytes`, nullable
+`total_bytes`, and nullable `percent`; it has no internal `stage` field. Railway
+derives a stage from `queued`, `running`, `completed`, `failed` or `cancelled`.
+The worker also exposes authenticated `/api/v1/internal/activity` with a boolean
+`busy` field for shutdown decisions.
+
+## Execution, retry and shutdown
+
+1. Railway validates a request and persists a queued local job before dispatch.
+   Admission reserves one per-job byte budget; the queue, job count and aggregate
+   storage limits can reject work before extraction starts.
+2. A remote operation holds an activity guard and acquires the in-process
+   lifecycle mutex. It polls controller state, requests a start when needed, and
+   waits for the worker's `/health`. The mutex serializes startup and stop
+   decisions for this Railway process.
+3. Dispatch uses Railway's UUID for the first extraction attempt. An uncertain
+   HTTP delivery is retried once with the same UUID/idempotency key. This is
+   distinct from retrying extraction after a worker has failed.
+4. Railway polls worker job state every three seconds. A completed worker result
+   is copied over the authenticated file route to Railway storage. Its extension
+   must be supported; its declared size must be positive and below the configured
+   maximum. Streamed size must exactly match that declaration and remain within
+   the byte cap. Partial local transfers are cleaned on failure. Only a fully
+   published local file makes the Railway job complete.
+5. After a validated dispatch, remote cleanup is attempted with `DELETE` after
+   completion, failure or cancellation. It is best effort; worker TTL cleanup is
+   still necessary. A lost response, process crash or malformed dispatch reply
+   can leave work behind, so exactly-once execution is not guaranteed.
+6. The idle watcher checks every fifteen seconds. It requires no local active
+   operations, an elapsed idle interval, the lifecycle mutex, VM `RUNNING`, and a
+   worker activity reply of `busy: false` before requesting stop. Unknown worker
+   activity blocks shutdown. A new operation arriving during a stop waits and
+   restarts the same VM. An independent GCP maximum run duration is needed if
+   Railway disappears or stop requests fail.
+
+`GCP_MAX_JOB_ATTEMPTS` defaults to 2 (range 1–3). A retryable
+`DOWNLOAD_INTERRUPTED` result gets a fresh worker UUID, while the local Railway
+job ID stays stable. Network/contract errors, queue-full results and cancellation
+are not generically retried. **The current remote consumer maps every worker
+`failed` state to `DOWNLOAD_INTERRUPTED`, discarding the worker's original error
+code**, so a worker access restriction or local timeout may also consume this
+bounded retry. Metadata non-success HTTP responses map to `ACCESS_RESTRICTED`;
+that code alone cannot distinguish an Access policy rejection from a YouTube
+restriction. Use correlated logs and the failing layer when diagnosing either.
+
+## Time budgets and readiness
+
+| Budget | Implemented behavior |
+| --- | --- |
+| `GCP_START_TIMEOUT_SECS` | Default 300; range 60–900; bounds readiness polling and its in-flight HTTP calls after the lifecycle lock is acquired |
+| Controller HTTP | 10-second connect, 45-second whole request; no redirects |
+| Worker readiness | Seven-second health request bound; lifecycle polling every five seconds |
+| Worker HTTP client | 10-second connect, 1800-second whole request; no redirects |
+| Remote file transfer | 60-second next-chunk bound, plus worker HTTP and outer job deadlines; no byte-range resume |
+| `DOWNLOAD_TIMEOUT_SECS` | Default 1800 at each service; bounds its own job execution, including cold startup on Railway |
+| `REQUEST_TIMEOUT_SECS` | Default 30; bounds API handlers before the response is returned, including synchronous metadata |
+| `STALL_TIMEOUT_SECS` | yt-dlp workspace growth check, default 180; valid values 30–1800, otherwise defaults to 180 |
+| `GCP_IDLE_TIMEOUT_SECS` | Default 300; range 60–3600; elapsed idle time plus watcher scheduling and HTTP time |
+
+Increasing one timeout does not change the others. In particular, synchronous
+metadata can exceed Railway's default request deadline during a cold start;
+queueing a download returns promptly and moves startup into background work.
+Lifecycle lock waiting, provider time, worker queues, file copy, and client/edge
+request limits must fit the selected operation's outer budget. A longer
+`DOWNLOAD_TIMEOUT_SECS` does not increase the remote client's fixed 1800-second
+HTTP deadline. Tunnel or reverse-proxy limits may impose another independent
+ceiling. The service does not promise that an abandoned metadata request stops
+all upstream work immediately.
+
+`/health` checks configuration, writable local disk and FFmpeg/FFprobe. With
+`YTDLP_PROXY_REQUIRED=true`, it also checks the local SOCKS listener and
+`warp-cli status`. It does not verify a working SOCKS negotiation, yt-dlp/EJS
+compatibility, an authenticated end-to-end tunnel path, or actual YouTube media
+access. Railway's own healthy response does not wake or validate the GCP worker.
+Readiness results are cached briefly. Test each network path separately.
+
+## Persistence, capacity and availability
+
+There are two independent bounded queues and two storage budgets: Railway's and
+the VM's. Railway `WORKERS` limits concurrent remote operations; worker `WORKERS`
+limits actual extractions. Forwarding five operations to a two-worker VM does
+not create five extraction slots. Each service reserves a full
+`MAX_DOWNLOAD_BYTES` budget for active/queued jobs and counts retained output
+against `MAX_STORAGE_BYTES`; disk headroom and OS resource limits remain needed.
+
+Keep one Railway replica and one worker process on the configured VM. The
+lifecycle lock, activity tracking, rate limiter and idempotency state are local,
+not distributed leases. Two Railway replicas can stop each other's VM or
+conflict over dispatch. Horizontal scaling requires shared durable coordination,
+job ownership and storage before increasing replicas.
+
+[`src/jobs.rs`](../src/jobs.rs) persists records beneath `DATA_DIR/state`.
+Restart recovery can requeue unexpired queued records with a stored request when
+queue capacity permits. Running jobs are marked interrupted rather than silently
+redispatched; cleanup-pending/cancelled records are also handled as interrupted
+cleanup. Completed files survive only when the same volume and valid output are
+retained. This is not transparent resume of remote jobs or partially copied
+bytes. VM stop preserves a persistent disk, not an in-flight process. Do not
+assume graceful cleanup when a hard run-duration limit fires.
+
+The workload remains single-operator and has no measured traffic forecast or
+capacity benchmark. Existing provisional control-plane targets are p50 20 ms,
+p95 80 ms, p99 200 ms, excluding metadata, media, filesystem stalls and FFmpeg;
+99.9% monthly API availability and a 30-minute restore target remain unverified
+planning targets. RPO depends on an approved backup schedule. A named service
+owner, measured cold-start distributions and restore exercises are required
+before treating these as commitments. Retention is not backup, and a stopped VM
+still incurs persistent-disk and potentially reserved-address costs.
+
+## Verification boundaries
+
+Deterministic tests and [evals](../evals/README.md) exercise input contracts,
+controller/worker fixtures, lifecycle failures, cancellation and bounded media
+handling. They establish behavior against controlled inputs. A live acceptance
+run must separately establish Cloud Run authentication/IAM, VM boot, WARP egress,
+Access/Tunnel routing, metadata, playable audio/video bytes, cancellation and
+idle shutdown. Download only authorized media; do not use proxy rotation,
+CAPTCHA bypass, stolen cookies or DRM circumvention. Preserve safe errors and
+report the failing layer when an upstream or network policy denies access.

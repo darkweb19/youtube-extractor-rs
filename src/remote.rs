@@ -665,18 +665,13 @@ impl Remote {
         // A Railway restart restores ownership only from a durable boot-ID
         // marker created after an accepted POST /start + healthy worker. A
         // manually started VM never acquires such a marker.
-        let recovered_boot = if self.auto_started.load(Ordering::SeqCst) {
-            None
-        } else {
-            let owned = self.read_ownership().await?;
-            if owned.is_none() {
-                tracing::debug!(event = "idle_shutdown_skipped",
-                    reason = "vm_not_started_by_railway",
-                    "VM remains under external control");
-                return Ok(());
-            }
-            owned
-        };
+        let recovered_boot = self.read_ownership().await?;
+        if !self.auto_started.load(Ordering::SeqCst) && recovered_boot.is_none() {
+            tracing::debug!(event = "idle_shutdown_skipped",
+                reason = "vm_not_started_by_railway",
+                "VM remains under external control");
+            return Ok(());
+        }
         let idle = self
             .last_activity
             .lock()

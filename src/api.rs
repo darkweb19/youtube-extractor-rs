@@ -308,7 +308,11 @@ async fn video_info(
 }
 async fn worker_activity(State(state): State<ApiState>) -> Json<serde_json::Value> {
     let active = state.jobs.has_activity().await;
-    Json(serde_json::json!({"busy": active}))
+    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .ok()
+        .and_then(|value| Uuid::parse_str(value.trim()).ok())
+        .map(|id| id.to_string());
+    Json(serde_json::json!({"busy": active, "boot_id": boot_id}))
 }
 async fn create_download(
     State(state): State<ApiState>,

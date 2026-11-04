@@ -271,10 +271,14 @@ fn health_response(ready: bool) -> Response {
                 .ok()
                 .and_then(|value| Uuid::parse_str(value.trim()).ok())
                 .map(|id| id.to_string());
-            (StatusCode::OK, Json(serde_json::json!({
-                "status":"ok", "storage":"local",
-                "durability":"requires_persistent_volume", "boot_id":boot_id
-            }))).into_response()
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status":"ok", "storage":"local",
+                    "durability":"requires_persistent_volume", "boot_id":boot_id
+                })),
+            )
+                .into_response()
         }
     } else {
         (

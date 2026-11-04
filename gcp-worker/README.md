@@ -33,12 +33,14 @@ sha256sum -c SHA256SUMS
 bash setup-ubuntu.sh
 ```
 
-The setup script installs only runtime dependencies (Node.js, FFmpeg, Python
-yt-dlp and WARP) as required. It does not install Git, Docker or Rust.
+The setup script installs runtime dependencies (system-wide Deno, FFmpeg,
+Python and yt-dlp). WARP is optional and not required for the worker.
+It does not install Git, Docker or Rust.
 
-5. Because this is your existing WARP test VM, retain its registration,
-   confirm `warp-cli status` reports connected, and continue with the
-   worker configuration and `bash install-service.sh` steps below.
+5. Leave existing WARP registration untouched if installed. For the current
+   working download path, configure yt-dlp for **direct GCP egress** and verify
+   that `sudo -u extractor /usr/local/bin/deno --version` succeeds after the
+   `install-service.sh` step.
 6. Configure Cloudflare Tunnel + Access and Railway secrets as documented
    below before enabling `EXTRACTOR_MODE=remote`.
 
@@ -59,12 +61,9 @@ On your Ubuntu 24.04 VM:
 ```bash
 cd ~/extractor-bundle
 bash setup-ubuntu.sh
-# WARP registration already exists on your test VM; do not re-register it.
-warp-cli mode proxy
-warp-cli proxy port 40000
-warp-cli connect
-warp-cli status
-curl --proxy socks5h://127.0.0.1:40000 https://www.cloudflare.com/cdn-cgi/trace | grep warp=
+# Direct GCP outbound networking worked in the November 4 diagnostic test.
+# WARP is NOT needed for metadata or download requests.
+/usr/local/bin/deno --version
 sudo install -m 0600 worker.env.example /etc/youtube-extractor.env
 sudoedit /etc/youtube-extractor.env   # SET API_TOKEN to a unique secret first
 bash install-service.sh
@@ -78,19 +77,27 @@ protect the hostname with Cloudflare Access service-token policy. Use a
 Cloudflare-managed tunnel token installed via `sudo cloudflared service install`
 and verify it reconnects after VM boot. Never check tunnel tokens into Git.
 Railway requires `GCP_WORKER_URL` pointing at that HTTPS hostname plus its
-Access client ID/secret and worker bearer token. The VM needs outbound access
-for Cloudflare Tunnel and WARP.
+Access client ID/secret and worker bearer token. The VM needs outbound access to YouTube and for Cloudflare Tunnel.
+Cloudflare Tunnel/Access protects the worker's inbound API separately from WARP.
 
 A bare TCP port or unprotected tunnel is **not** an acceptable production setup.
-Verify `systemctl is-enabled warp-svc youtube-extractor cloudflared`.
+Verify `systemctl is-enabled youtube-extractor cloudflared`; WARP is optional.
 
 ## VM startup and shutdown
 
 Railway's `EXTRACTOR_MODE=remote` starts the VM through the keyless Cloud Run controller,
 waits for RUNNING + `/health`, then submits jobs to the worker's existing
 bounded Tokio queue. Queued jobs use UUIDs. Railway transfers outputs to its
-own storage before declaring success. Railway stops the VM after 300 seconds
-without active operations **only when the running Railway process started the VM itself**. A manually started VM is left running for troubleshooting. After a Railway restart, the new process also leaves an already-running VM untouched; configure an independent GCP maximum-runtime guard to limit costs. If a new request arrives during a stop, it must
+own storage before declaring success. Railway stops the VM after 300 seconds without active operations **only for a
+VM it started**. A manually started VM remains running for troubleshooting.
+After an accepted controller `POST /start`, Railway records the worker's Linux
+boot ID in `DATA_DIR/.railway-vm-ownership` (persistent volume required). On
+a Railway process restart, the idle watcher validates that the live worker still
+has that boot ID before issuing `POST /stop`. A VM manually rebooted after the
+original Railway start has a different boot ID and is never stopped using a
+stale ownership marker. If ownership cannot be verified or the worker activity
+check fails, shutdown fails closed. Use the independent GCP maximum runtime
+as a cost guard for these cases. If a new request arrives during a stop, it must
 wait and restart the same VM (never duplicate instances).
 
 **Configure an independent GCP maximum VM run duration** with termination
@@ -204,6 +211,37 @@ the deployment checks above must run in the selected deployment to establish
 that. Roll back through Railway's deployment history if required, retaining the
 volume and configuration; the older consumer will still have the contract bug.
 
+## Apply direct egress on an existing GCP VM
+
+Updating the source/example environment file **does not change** the existing
+`/etc/youtube-extractor.env`. After installing the new prebuilt worker bundle,
+back up and update that file, keeping its current API token:
+
+```bash
+sudo cp -a /etc/youtube-extractor.env /etc/youtube-extractor.env.backup
+sudo sed -i -e '/^YTDLP_PROXY=/d' \\
+  -e 's/^YTDLP_PROXY_REQUIRED=.*/YTDLP_PROXY_REQUIRED=false/' \\
+  /etc/youtube-extractor.env
+printf '%s\\n' 'YTDLP_JS_RUNTIME=deno' | sudo tee -a /etc/youtube-extractor.env >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl restart youtube-extractor
+sudo -u extractor /usr/local/bin/deno --version
+curl -fsS http://127.0.0.1:8080/health
+```
+
+Do not append a second `YTDLP_JS_RUNTIME` setting if one already exists;
+update the existing line instead. Existing Cloudflare Tunnel/Access credentials
+and `API_TOKEN` do not change. To diagnose the next failure:
+
+```bash
+sudo journalctl -u youtube-extractor --since '15 minutes ago' --no-pager -o cat
+railway logs --service YOUR_RAILWAY_SERVICE --environment production --since 1h --lines 500
+railway logs --service YOUR_RAILWAY_SERVICE --environment production --since 1h --lines 500 --filter 'idle_shutdown_requested OR worker_job_failed OR vm_ownership_saved'
+```
+
+`RUST_LOG=info,youtube_extractor::remote=debug` on Railway exposes idle-skip
+reasons; avoid outputting credentials or raw YouTube playback URLs.
+
 ## Railway controller configuration
 
 Provision a separate Google Cloud Run VM controller implementing the contract
@@ -281,8 +319,10 @@ runaway-cost guard. The code uses a single-process lifecycle lock and therefore
 is **not** safe for multiple independent Railway replicas; a multi-replica
 deployment requires a distributed lease and durable dispatch attempts.
 Transient HTTP dispatch transport failures are retried once with the same
-idempotency key. Worker `failed` states currently become `DOWNLOAD_INTERRUPTED`
-on Railway regardless of the worker's original error code, and can trigger a
-fresh extraction attempt up to `GCP_MAX_JOB_ATTEMPTS` (two by default). Direct
-queue rejection and cancellation are not retried as extraction failures. Do not
-interpret this bounded retry policy as precise classification of upstream causes.
+idempotency key. Worker `failed` states now preserve their typed `JobError.code` on Railway.
+`ACCESS_RESTRICTED` and `UPSTREAM_RATE_LIMITED` are not blindly retried;
+only `DOWNLOAD_INTERRUPTED` may trigger a fresh extraction attempt up to
+`GCP_MAX_JOB_ATTEMPTS` (two by default). Missing worker error details still
+fall back to `DOWNLOAD_INTERRUPTED`. Worker-side yt-dlp stderr is buffered
+briefly and classified into **fixed safe diagnostics**; signed media URLs,
+cookies and raw stderr are never emitted to Railway or the frontend.

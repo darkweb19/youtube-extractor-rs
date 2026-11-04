@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use std::{
     env,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex as StdMutex,
     },
     time::{Duration, Instant},
@@ -181,6 +181,8 @@ pub struct Remote {
     storage: LocalStorage,
     lifecycle: Mutex<()>,
     active: AtomicUsize,
+    // Only automatically shut down VMs started by this Railway process.
+    auto_started: AtomicBool,
     last_activity: StdMutex<Instant>,
 }
 
@@ -242,6 +244,7 @@ impl Remote {
             storage,
             lifecycle: Mutex::new(()),
             active: AtomicUsize::new(0),
+            auto_started: AtomicBool::new(false),
             last_activity: StdMutex::new(Instant::now()),
         }))
     }
@@ -377,6 +380,15 @@ impl Remote {
                     http_status = response.status().as_u16(),
                     "VM lifecycle request accepted"
                 );
+                match action {
+                    ControllerOperation::Start => {
+                        self.auto_started.store(true, Ordering::SeqCst);
+                    }
+                    ControllerOperation::Stop => {
+                        self.auto_started.store(false, Ordering::SeqCst);
+                    }
+                    ControllerOperation::Status => {}
+                }
                 Ok(LifecycleReply::Accepted)
             }
             StatusCode::CONFLICT => {
@@ -577,6 +589,16 @@ impl Remote {
                 event = "idle_shutdown_skipped",
                 reason = "active_work_after_lock",
                 "VM remains active"
+            );
+            return Ok(());
+        }
+        // A manually started VM is not owned by Railway. On Railway restart,
+        // ownership is intentionally lost, leaving GCP's runtime guard as fallback.
+        if !self.auto_started.load(Ordering::SeqCst) {
+            tracing::debug!(
+                event = "idle_shutdown_skipped",
+                reason = "vm_not_started_by_railway",
+                "VM remains under external control"
             );
             return Ok(());
         }
@@ -1165,6 +1187,7 @@ mod tests {
             storage,
             lifecycle: Mutex::new(()),
             active: AtomicUsize::new(0),
+            auto_started: AtomicBool::new(false),
             last_activity: StdMutex::new(Instant::now()),
         };
         (Arc::new(remote), dir)
@@ -1483,6 +1506,7 @@ mod tests {
         ])
         .await;
         let (remote, _dir) = remote(&controller, &worker).await;
+        remote.auto_started.store(true, Ordering::SeqCst);
         {
             let _activity = remote.activity();
             expire_idle(&remote);
@@ -1516,10 +1540,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manual_vm_start_is_never_stopped_by_idle_watcher() {
+        let controller = mock(vec![]).await;
+        let worker = mock(vec![]).await;
+        let (remote, _dir) = remote(&controller, &worker).await;
+        expire_idle(&remote);
+        remote.stop_if_idle().await.unwrap();
+        assert!(controller.requests.lock().unwrap().is_empty());
+        assert!(worker.requests.lock().unwrap().is_empty());
+        assert!(!remote.auto_started.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
     async fn idle_shutdown_fails_closed_when_worker_activity_is_unknown() {
         let controller = mock(vec![Reply::state("RUNNING")]).await;
         let worker = mock(vec![Reply::new(StatusCode::OK, "{}")]).await;
         let (remote, _dir) = remote(&controller, &worker).await;
+        remote.auto_started.store(true, Ordering::SeqCst);
         expire_idle(&remote);
         assert!(remote.stop_if_idle().await.is_err());
         assert!(!controller

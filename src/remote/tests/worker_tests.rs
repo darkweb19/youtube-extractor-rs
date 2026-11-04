@@ -251,6 +251,8 @@ async fn eval_idle_nonrunning_vm_never_checks_worker_or_requests_stop() {
         let controller = mock(vec![Reply::state(state)]).await;
         let worker = mock(vec![]).await;
         let (client, _dir) = remote(&controller, &worker).await;
+        // Test the non-running-state branch with a Railway-owned VM.
+        client.auto_started.store(true, Ordering::SeqCst);
         expire_idle(&client);
         client.stop_if_idle().await.unwrap();
 
@@ -259,6 +261,9 @@ async fn eval_idle_nonrunning_vm_never_checks_worker_or_requests_stop() {
         assert_eq!(requests.len(), 1, "state: {state}");
         assert_eq!(requests[0].path, "/status");
         assert_eq!(requests[0].method, Method::GET);
+        if state == "TERMINATED" {
+            assert!(!client.auto_started.load(Ordering::SeqCst));
+        }
     }
 }
 

@@ -1,8 +1,7 @@
 [Unit]
 Description=YouTube extractor private GCP worker
 Wants=network-online.target
-Requires=warp-svc.service
-After=network-online.target warp-svc.service
+After=network-online.target
 
 [Service]
 Type=simple

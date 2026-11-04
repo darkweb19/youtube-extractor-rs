@@ -46,18 +46,41 @@ async fn capture_ytdlp_stderr(mut stderr: tokio::process::ChildStderr) -> String
 // to Railway logs, API clients, or the web UI.
 fn classify_ytdlp_stderr(stderr: &str) -> (ErrorCode, &'static str, &'static str) {
     let lower = stderr.to_lowercase();
-    if lower.contains("sign in to confirm") || lower.contains("confirm you") && lower.contains("not a bot")
+    if lower.contains("sign in to confirm")
+        || lower.contains("confirm you") && lower.contains("not a bot")
         || lower.contains("login_required")
     {
-        (ErrorCode::AccessRestricted, "bot_verification", "YouTube requested verification of automated access")
+        (
+            ErrorCode::AccessRestricted,
+            "bot_verification",
+            "YouTube requested verification of automated access",
+        )
     } else if lower.contains("http error 429") || lower.contains("too many requests") {
-        (ErrorCode::UpstreamRateLimited, "rate_limited", "YouTube temporarily rate-limited requests")
+        (
+            ErrorCode::UpstreamRateLimited,
+            "rate_limited",
+            "YouTube temporarily rate-limited requests",
+        )
     } else if lower.contains("http error 403") || lower.contains("forbidden") {
-        (ErrorCode::AccessRestricted, "http_403", "YouTube denied access to the requested media")
-    } else if lower.contains("no supported javascript runtime") || lower.contains("js challenge solver") {
-        (ErrorCode::PlayerChanged, "javascript_challenge", "YouTube player challenge could not be solved")
+        (
+            ErrorCode::AccessRestricted,
+            "http_403",
+            "YouTube denied access to the requested media",
+        )
+    } else if lower.contains("no supported javascript runtime")
+        || lower.contains("js challenge solver")
+    {
+        (
+            ErrorCode::PlayerChanged,
+            "javascript_challenge",
+            "YouTube player challenge could not be solved",
+        )
     } else {
-        (ErrorCode::AccessRestricted, "upstream_rejection", "yt-dlp could not access this YouTube media")
+        (
+            ErrorCode::AccessRestricted,
+            "upstream_rejection",
+            "yt-dlp could not access this YouTube media",
+        )
     }
 }
 
@@ -124,7 +147,10 @@ impl YtDlp {
             .spawn()
             .map_err(|_| AppError::new(ErrorCode::Internal, "yt-dlp executable is unavailable"))?;
         let stderr = child.stderr.take().ok_or_else(|| {
-            AppError::new(ErrorCode::Internal, "yt-dlp metadata diagnostic pipe is unavailable")
+            AppError::new(
+                ErrorCode::Internal,
+                "yt-dlp metadata diagnostic pipe is unavailable",
+            )
         })?;
         let diagnostics = tokio::spawn(capture_ytdlp_stderr(stderr));
         let stdout = child.stdout.take().ok_or_else(|| {
@@ -551,7 +577,10 @@ mod tests {
         assert_eq!(code, ErrorCode::AccessRestricted);
         assert_eq!(reason, "bot_verification");
         assert!(!message.contains(secret));
-        assert_eq!(classify_ytdlp_stderr("HTTP Error 429").0, ErrorCode::UpstreamRateLimited);
+        assert_eq!(
+            classify_ytdlp_stderr("HTTP Error 429").0,
+            ErrorCode::UpstreamRateLimited
+        );
     }
     #[test]
     fn metadata_never_exposes_upstream_signed_urls() {

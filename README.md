@@ -1,152 +1,193 @@
-# YouTube extraction service (Rust / Axum + yt-dlp)
+# YouTube Extractor
 
-The `fix/rust-yt-bot` branch uses **yt-dlp 2026.10.21** for both YouTube metadata discovery and media downloading. Rust/Axum continues to handle authentication, the unchanged HTTP API and browser UI, job lifecycle, cancellation, storage and file delivery. FFmpeg handles media post-processing.
+A small Rust service for getting YouTube video information and downloading audio or
+video. It includes an authenticated HTTP API and **Frame**, a browser interface for
+creating MP4 downloads. Downloads run in the background, so clients can check their
+progress and collect the finished file when it is ready.
 
-The active adapter is `src/ytdlp.rs`. The old native player parser is retained for regression tests but `rusty_ytdl` is removed. The production Docker image installs pinned yt-dlp with its packaged EJS solver and Node.js 24; no Cloudflare WARP or IP rotation is configured.
+Rust and Axum handle the API, jobs and storage. **yt-dlp** handles extraction, and
+FFmpeg handles media processing. You can run everything on one machine or keep the
+API on Railway and send extraction work to an on-demand GCP worker.
 
-**Network restriction remains:** changing to yt-dlp does not fix a YouTube block on Railway's outbound IP. Test real metadata and authorized media retrieval from the deployed service; `/health` and fixture tests do not prove YouTube access.
+Use it with media you own or have permission to download. YouTube availability
+depends on the video and the server's network; a healthy service does not guarantee
+that a particular video can be retrieved.
 
-## Browser interface
+## Getting started
 
-Open the service root at `https://YOUR-RAILWAY-DOMAIN/`. The bundled, responsive browser UI provides a two-step workflow:
-
-1. Paste a normal YouTube/watch/Shorts link and select **Generate MP4**. The first step opens a privacy-enhanced YouTube player for confirmation only; no extraction job is created.
-2. Choose **Continue to generate**. The UI submits an authenticated MP4 job, polls its state, displays bounded progress when available, and finally loads the authenticated file as a temporary browser blob for playback and a **Download MP4** button. Backend and network failures appear as toasts and a persistent error panel; users can cancel queued/running jobs.
-
-The API remains bearer-protected, including completed files. Enter your existing `API_TOKEN` in **Private API access** on the page. The UI retains it only in the current tab's memory; it is not baked into HTML/JavaScript, saved to local storage, or transmitted to YouTube. Use this interface only as a trusted single-operator tool on HTTPS. Anyone who knows the shared token can operate all jobs: **do not post the token publicly or use this UI as an anonymous public downloader**. Consider additional edge access controls for an exposed Railway domain.
-
-Authenticated video preview downloads the MP4 into a browser Blob because a native `<video>` element cannot attach the required bearer header. For large files, this uses significant browser memory and bandwidth; keep the tab open while the job runs. The MP4 and its local job record expire according to `JOB_TTL_SECS`. The YouTube confirmation player is a separate third-party embed and may itself be unavailable for restricted videos. Neither preview nor a healthy API confirms that Railway's outbound IP is allowed to extract a YouTube video.
-
-## Usage
-
-### Run locally
-
-Install the pinned Rust toolchain and FFmpeg (`ffmpeg` and `ffprobe`). On macOS: `brew install ffmpeg jq`. The Rust build uses the committed `Cargo.lock`. Local runs additionally require yt-dlp 2026.10.21, its `yt-dlp-ejs` scripts, Node.js 22+ and FFmpeg; the Docker image supplies these.
-
-Generate a strong API token, for example with `openssl rand -hex 32`, and store it in your local `.env` or hosting provider's secret settings. Use the same token in your API clients.
+For a local build, install the toolchain in `rust-toolchain.toml`, FFmpeg/ffprobe,
+Python 3 with venv support, and a JavaScript runtime. This example uses Node.js 22+
+(the Docker image includes Node.js 24):
 
 ```bash
+python3 -m venv work/venv
+work/venv/bin/pip install 'yt-dlp[default]==2026.10.21'
 cp -n .env.example .env
-# Edit .env: set API_TOKEN to your random token (at least 32 characters).
+# Edit .env and set API_TOKEN to a strong random secret, at least 32 characters.
+# For example, generate one with: openssl rand -hex 32
 set -a
 source .env
 set +a
-: "${API_TOKEN:?Set API_TOKEN in .env before starting}"
+export YTDLP_PATH="$PWD/work/venv/bin/yt-dlp"
+export YTDLP_JS_RUNTIME=node
 cargo run --locked
 ```
 
-The server binds `0.0.0.0:$PORT` (default `8080`). `/health` is public; all `/api/v1` endpoints require `Authorization: Bearer <API_TOKEN>`. `.env` is ignored and is loaded explicitly by your shell, not automatically by the service. `ALLOW_UNAUTHENTICATED=true` is available only for deliberate local development with no token configured.
+The service does not load `.env` automatically. The local environment above lives
+under ignored `work/`; keep `.env` out of commits. Open `http://localhost:8080/` and enter the same `API_TOKEN` under
+**Private API access**.
 
-### Call the API
+`YTDLP_JS_RUNTIME` defaults to `deno` in the application. Set it to `node` when using
+Node, including when running the root Docker image. The GCP setup installs Deno
+and uses `YTDLP_JS_RUNTIME=deno`.
 
-In another terminal, load the same `.env` or export the same `API_TOKEN` securely. Keep this shared credential on your backend: every holder can access all jobs and files. File URLs require authentication and are not public share links.
+### Using the browser
 
-```bash
-export BASE_URL='http://127.0.0.1:8080'
-# For a hosted service, use its HTTPS origin without a trailing slash.
-export VIDEO_URL='https://www.youtube.com/watch?v=VIDEO_ID'
-# Replace VIDEO_ID with a video you are authorized to download.
-: "${API_TOKEN:?Export the service API_TOKEN first}"
-```
+Paste a YouTube link and select **Generate MP4**. A confirmation dialog opens a
+YouTube preview; extraction starts only when you choose **Continue to generate**.
+The page then follows the job, shows errors or progress, and offers playback and
+**Download MP4** once the file is ready. You can cancel work while it is queued or
+running.
 
-| Method | Endpoint | Purpose |
+The token stays in the current tab's memory. It is not stored in local storage or
+sent to YouTube. This is a trusted operator interface: anyone with the shared token
+can access all jobs and files. Use HTTPS for hosted access. Completed preview loads
+the MP4 into a browser Blob, so large files also need room in browser memory.
+
+## API
+
+All `/api/v1` routes require `Authorization: Bearer <API_TOKEN>`. `/health` and the
+browser assets (`/`, `/app.css`, `/app.js`) are public. File links require the
+token too; they are not public share links.
+
+| Method | Endpoint | What it does |
 | --- | --- | --- |
-| `GET` | `/health` | Public local readiness check |
-| `POST` | `/api/v1/videos/info` | Metadata and supported available formats |
-| `POST` | `/api/v1/downloads` | Create an asynchronous job (`202 Accepted`) |
-| `GET` | `/api/v1/downloads/{job_id}` | Status, progress, output and errors |
-| `GET` | `/api/v1/downloads/{job_id}/file` | Authenticated completed-file download |
-| `DELETE` | `/api/v1/downloads/{job_id}` | Cancel work or delete retained resources |
+| `GET` | `/health` | Check local readiness (`200` or `503`) |
+| `POST` | `/api/v1/videos/info` | Get video metadata and available format descriptors |
+| `POST` | `/api/v1/downloads` | Queue a download; returns `202` and a job record |
+| `GET` | `/api/v1/downloads/{job_id}` | Get status, progress, output details and errors |
+| `GET` | `/api/v1/downloads/{job_id}/file` | Download a completed file |
+| `DELETE` | `/api/v1/downloads/{job_id}` | Cancel/delete a job; returns `204` |
+| `GET` | `/api/v1/internal/activity` | Internal worker activity and boot identity for lifecycle management |
 
-Check readiness and retrieve metadata:
+The service accepts watch, `youtu.be`, Shorts and `/live/` video links. A recognized
+link does not guarantee the content is downloadable. Playlists and arbitrary URLs
+are outside the API's scope.
+
+### Create and collect a download
+
+Load the service token into your shell, then choose a video you are permitted to
+retrieve. The examples use `jq` to build JSON and read the job ID.
 
 ```bash
-curl --fail --silent --show-error "$BASE_URL/health" | jq .
+export BASE_URL='http://localhost:8080'
+export VIDEO_URL='https://www.youtube.com/watch?v=VIDEO_ID'
+: "${API_TOKEN:?Load the service API_TOKEN first}"
 
+# Optional: inspect the video before creating a job.
 jq -n --arg url "$VIDEO_URL" '{url: $url}' |
-  curl --fail-with-body --silent --show-error \
-    --header "Authorization: Bearer $API_TOKEN" \
-    --header 'Content-Type: application/json' \
-    --data-binary @- "$BASE_URL/api/v1/videos/info" | jq .
-```
+  curl --fail-with-body -sS "$BASE_URL/api/v1/videos/info" \
+    -H "Authorization: Bearer $API_TOKEN" \
+    -H 'Content-Type: application/json' --data-binary @- | jq .
 
-Create a video job and capture its identifier:
-
-```bash
-set -euo pipefail
+# Create a 720p-or-lower MP4 job.
 JOB_JSON=$(jq -n --arg url "$VIDEO_URL" \
   '{url: $url, type: "video", format: "mp4", quality: "720p"}' |
-  curl --fail-with-body --silent --show-error \
-    --header "Authorization: Bearer $API_TOKEN" \
-    --header 'Content-Type: application/json' \
-    --data-binary @- "$BASE_URL/api/v1/downloads")
-JOB_ID=$(printf '%s' "$JOB_JSON" | jq -er '.job_id')
-printf '%s\n' "$JOB_JSON" | jq .
+  curl --fail-with-body -sS "$BASE_URL/api/v1/downloads" \
+    -H "Authorization: Bearer $API_TOKEN" \
+    -H 'Content-Type: application/json' --data-binary @-) || exit 1
+JOB_ID=$(printf '%s' "$JOB_JSON" | jq -er '.job_id') || exit 1
+
+# Repeat about every five seconds until the job reaches a terminal state.
+curl --fail-with-body -sS "$BASE_URL/api/v1/downloads/$JOB_ID" \
+  -H "Authorization: Bearer $API_TOKEN" | jq .
+
+# Run after status is "completed".
+curl --fail -sS "$BASE_URL/api/v1/downloads/$JOB_ID/file" \
+  -H "Authorization: Bearer $API_TOKEN" --output video.mp4
+
+# Optional: remove the retained job and file when finished.
+curl --fail -sS -X DELETE "$BASE_URL/api/v1/downloads/$JOB_ID" \
+  -H "Authorization: Bearer $API_TOKEN"
 ```
 
-Poll this route about every five seconds until `status` is `completed` or `failed`:
+For audio, use the same creation endpoint with this body:
 
-```bash
-curl --fail-with-body --silent --show-error \
-  --header "Authorization: Bearer $API_TOKEN" \
-  "$BASE_URL/api/v1/downloads/$JOB_ID" | jq .
+```json
+{"url":"https://www.youtube.com/watch?v=VIDEO_ID","type":"audio","format":"mp3","quality":"best","audio_bitrate_kbps":128}
 ```
 
-`202 Accepted` means the job was queued. It does not mean extraction succeeded. A failed job includes an `error.code` and safe message; inspect that response before retrying. After `completed`, download the bytes:
+| Option | Supported values |
+| --- | --- |
+| Video format | `original`, `mp4`, `webm` |
+| Audio format | `original`, `m4a`, `mp3` |
+| Video quality | `best`, `worst`, or a height such as `720p` or `1080p` |
+| Audio quality | `best`, `worst` |
+| Audio conversion bitrate | `32`–`320` kbps; audio jobs only |
 
-```bash
-curl --fail --silent --show-error \
-  --header "Authorization: Bearer $API_TOKEN" \
-  --output video.mp4 "$BASE_URL/api/v1/downloads/$JOB_ID/file"
+A video height is a ceiling, not a promise of that resolution. Available streams
+and compatible codecs determine the result. `quality` and `audio_bitrate_kbps` are
+optional; unknown request fields are rejected.
+
+Jobs move through `queued`, `running`, then `completed`, `failed` or `cancelled`.
+Status responses include `job_id`, timestamps, `progress`, `output`, `error` and a
+relative `download_url` when complete. Total bytes and percentage can be unknown.
+`202` means accepted, not downloaded. A failed job's `error.code` and `error.message`
+explain what happened, even when the status request itself returns `200`.
+
+Ordinary API errors use `{"error":{"code":"...","message":"..."}}`. Common
+causes include invalid input (`400`), a missing/wrong token (`401`), upstream access
+restrictions (`403`), missing jobs/files (`404`), rate limits (`429`) and exhausted
+admission capacity (`503`). Back off on temporary pressure; repeated retries do not
+resolve an access restriction. See [the API reference](docs/api.md) for response
+examples and the complete error table.
+
+## Architecture overview
+
+```mermaid
+flowchart TD
+    Client[Browser or API client] --> API[Rust / Axum API]
+    API --> Jobs[Bounded jobs and persistent records]
+    Jobs --> Local[Local yt-dlp and FFmpeg]
+    Jobs --> Remote[Remote adapter]
+    Remote --> Controller[Cloud Run VM controller]
+    Controller --> VM[Start / stop GCP VM]
+    Remote --> Access[Cloudflare Tunnel and Access]
+    Access --> Worker[GCP worker: same Rust binary, yt-dlp and FFmpeg]
+    Local --> Files[Local completed files]
+    Worker --> Copy[Bounded copy back to API host]
+    Copy --> Files
+    Files --> Client
 ```
 
-For MP3 audio, create a separate job with this request and use its returned `job_id` for the same status/file routes:
+**Local mode** (`EXTRACTOR_MODE=local`, the default) does extraction and processing
+on the API host. The active adapter is `src/ytdlp.rs`; the native parser and transfer
+modules remain for regression coverage and are not the active extraction engine.
 
-```bash
-jq -n --arg url "$VIDEO_URL" \
-  '{url: $url, type: "audio", format: "mp3", quality: "best", audio_bitrate_kbps: 128}' |
-  curl --fail-with-body --silent --show-error \
-    --header "Authorization: Bearer $API_TOKEN" \
-    --header 'Content-Type: application/json' \
-    --data-binary @- "$BASE_URL/api/v1/downloads" | jq .
-```
+**Remote mode** keeps the API, job records and completed files on Railway. A
+separately provisioned Cloud Run controller starts a configured Compute Engine VM.
+The API reaches its worker through Cloudflare Tunnel/Access, submits work, polls it,
+and copies the result back before marking the public job complete. Metadata
+requests also use the worker and may need to wait for startup.
 
-Audio output supports `original`, `m4a`, and `mp3`; conversion bitrate is 32–320 kbps. Video output supports `original`, `mp4`, and `webm`. A video quality such as `720p` or `1080p` is a ceiling: the best compatible available source at or below that height is selected. `best` and `worst` are also accepted. See the [API contract](docs/api.md) for fields and error codes.
+The GCP worker defaults to **direct outbound access**, with Deno for yt-dlp's
+JavaScript runtime. WARP is an optional, separately validated proxy configuration;
+it is not required by the current worker setup. Cloudflare Tunnel protects inbound
+traffic and does not provide the worker's outbound route.
 
-Cancel or delete a job when finished; otherwise retention cleanup removes it after the configured TTL:
+Jobs and files live under `DATA_DIR`. Use one API replica and persistent storage;
+there is no distributed queue, shared database or object-storage backend. After a
+restart, eligible unexpired queued jobs with saved requests can be replayed if
+queue space is available. Running jobs become `DOWNLOAD_INTERRUPTED`; retained
+completed files remain available on the same volume until expiry. Downloads do not
+resume transparently after a restart.
 
-```bash
-curl --fail --silent --show-error --request DELETE \
-  --header "Authorization: Bearer $API_TOKEN" \
-  "$BASE_URL/api/v1/downloads/$JOB_ID"
-```
+## Deployment
 
-## Deployment guidelines
+### Docker or Railway
 
-### Railway
-
-1. Create a **separate service** from this GitHub repository and select the reviewed branch/commit. Keep the repository root as the build root. The supplied `railway.toml` selects the Dockerfile, `/health`, restart policy, and one replica. Let the Docker image's entry point start the service.
-2. Set `API_TOKEN` to a strong random secret, `ALLOW_UNAUTHENTICATED=false`, and `DATA_DIR=/data` in service variables. Railway supplies `PORT`; the application listens on `0.0.0.0:$PORT`.
-3. Attach a persistent volume at `/data`, sized above the configured storage budget with room for filesystem overhead (for example, 10 GiB for the default 8 GiB logical budget). Ensure UID/GID `10001:10001` can write it using the platform's supported volume initialization process. The application runs as that non-root user.
-4. Keep **one replica**. Jobs and files use local volume state; replicas do not share a queue or job namespace. Start with roughly 2 CPU cores and 2 GiB RAM for two workers, then measure your workload and apply hard resource limits. These are starting estimates, not measured production guarantees.
-5. Expose an HTTPS domain or use private service networking. Keep the bearer token in the consuming backend's secret settings. Set the health-check path to `/health`, and verify that a `POST /api/v1/videos/info` request without an authorization header returns `401`.
-6. Test actual metadata, audio, and video retrieval through that deployed service. A healthy process does not prove YouTube allows the Railway outbound IP.
-
-Use the included external smoke script after deploying. It requires `curl`, Python 3, and `ffprobe` on the machine running the script:
-
-```bash
-export BASE_URL='https://YOUR-SERVICE-DOMAIN'
-export YOUTUBE_TEST_URL='https://www.youtube.com/watch?v=VIDEO_ID'
-export ALLOW_EXTERNAL_YOUTUBE=1
-# Export the same API_TOKEN securely, and select authorized test media.
-bash scripts/smoke-railway.sh
-```
-
-The script calls the deployed service, retrieves actual MP3/MP4 bytes, and validates them with `ffprobe`. Railway deployment and live YouTube compatibility remain unverified in this repository's recorded results; these steps are deployment guidance.
-
-### Docker on a VPS or your own server
-
-Build the image and create a persistent named volume. Export `API_TOKEN` securely before starting the container:
+The root `Dockerfile` includes the Rust binary, yt-dlp **2026.10.21** with its EJS
+scripts, Node.js **24**, Python and FFmpeg. It runs as UID/GID `10001:10001`.
 
 ```bash
 docker build -t youtube-extractor:local .
@@ -154,70 +195,82 @@ docker volume create youtube-extractor-data
 : "${API_TOKEN:?Export a strong API_TOKEN first}"
 docker run --detach --name youtube-extractor --restart unless-stopped \
   --publish 127.0.0.1:8080:8080 \
-  --env API_TOKEN --env PORT=8080 --env DATA_DIR=/data \
-  --env ALLOW_UNAUTHENTICATED=false \
+  --env API_TOKEN --env DATA_DIR=/data --env YTDLP_JS_RUNTIME=node \
   --mount type=volume,src=youtube-extractor-data,dst=/data \
-  --memory 2g --cpus 2 --pids-limit 128 --cap-drop ALL \
-  --security-opt no-new-privileges:true --stop-timeout 40 \
   youtube-extractor:local
-curl --fail --silent --show-error --retry 15 --retry-connrefused \
-  --retry-delay 1 --max-time 5 http://127.0.0.1:8080/health
 ```
 
-For public access, put a host reverse proxy such as Caddy or Nginx in front of `127.0.0.1:8080` and terminate HTTPS there. Point your domain's DNS at the server and configure proxy timeouts for expected file transfers. The API clients then use that HTTPS origin as `BASE_URL`. The named volume persists when the container is replaced; back it up separately.
+Use an HTTPS reverse proxy for public access. On Railway, build from the repository
+root using the supplied `railway.toml`, set `API_TOKEN`, `DATA_DIR=/data` and
+`YTDLP_JS_RUNTIME=node`, and mount a persistent volume at `/data`. Railway supplies
+`PORT`. Keep one replica and ensure the volume is writable by UID/GID `10001`.
+Size the disk above the logical storage budget to leave filesystem headroom.
 
-For managed build environments that inject a proxy CA, use the [documented BuildKit secret mounts](docs/deployment.md#container-use). Keep TLS verification enabled.
+### On-demand GCP worker
 
-### Render, Fly.io, and other container platforms
+Set `EXTRACTOR_MODE=remote` on the API host and configure:
 
-Use a long-running Docker service with persistent storage and one instance. The runtime image already contains FFmpeg and certificates; no Python/Node extraction backend or custom start command is needed.
-
-| Platform | Build and routing | Storage and runtime settings |
-| --- | --- | --- |
-| Render | Create a Web Service from the repository using its Dockerfile. Use `/health` for health checks and the service's HTTPS domain for clients. | Choose a plan supporting a persistent disk, mount it at `/data`, set `DATA_DIR=/data`, configure `API_TOKEN`, and keep one instance. Respect the provider's `PORT`. |
-| Fly.io | Deploy the Dockerfile to a Fly Machine; route the HTTP service to internal port `8080` and enable HTTPS. | Mount a Fly Volume at `/data` in the Machine's region, set `PORT=8080` and `DATA_DIR=/data`, store `API_TOKEN` as a Fly secret, and keep one Machine. Disable automatic stopping while background jobs must continue. |
-| Other Docker hosts | Build this Dockerfile or push the built image to your registry. Route the platform's HTTP service to the configured `PORT`. | Supply the token through secret settings, persistent writable storage at `/data`, `/health` checks, explicit resource limits, and one application instance. |
-
-Check volume permissions for UID/GID `10001:10001` on every platform. The Dockerfile builds the Rust API and installs yt-dlp, Node.js, EJS scripts and FFmpeg. Keep yt-dlp and its JavaScript challenge solver updated when YouTube changes. Diskless or scale-to-zero deployments can lose local state or interrupt background jobs; the current architecture requires persistent storage and a running worker process. Horizontal scaling needs a shared durable queue/database and object storage, which are not implemented.
-
-### Configuration and operations
-
-| Variable | Default | Guidance |
-| --- | --- | --- |
-| `API_TOKEN` | required | Same secret for every authenticated route, including files; at least 32 visible ASCII characters |
-| `ALLOW_UNAUTHENTICATED` | `false` | Keep false in production |
-| `PORT` | `8080` | Use the provider's assigned port, or route to 8080 |
-| `DATA_DIR` | `data`; image: `/data` | Mount persistent writable storage here |
-| `WORKERS` / `QUEUE_CAPACITY` | `2` / `16` | Concurrent jobs / maximum waiting jobs |
-| `MAX_DOWNLOAD_BYTES` | `1073741824` (1 GiB) | Combined downloaded inputs plus processing output per job |
-| `MAX_STORAGE_BYTES` | `8589934592` (8 GiB) | Logical reservations and retained-output limit; leave physical disk headroom |
-| `JOB_TTL_SECS` | `3600` | Retention period for completed jobs and files |
-| `REQUESTS_PER_MINUTE` | `120` | Shared API rate limit; polling consumes this budget |
-| `DOWNLOAD_TIMEOUT_SECS` | `1800` | Rust job and FFmpeg timeout |
-
-The storage budget can reject admission before the queue fills. A remux usually needs roughly twice the source size while inputs and output coexist. On restart, interrupted queued/running jobs become failed with `DOWNLOAD_INTERRUPTED`; completed files survive only if the same persistent volume is retained. See [deployment and operations](docs/deployment.md) for all variables, backups, rollback, trust configuration, and recovery behavior.
-
-| Symptom | Check |
+| Variable | Purpose |
 | --- | --- |
-| Startup refuses to run / `401` | Set a valid `API_TOKEN` and send the matching bearer header |
-| `/health` returns `503` | Writable `DATA_DIR`, volume ownership, and FFmpeg/FFprobe availability |
-| `NETWORK` / `DNS` | Host DNS, outbound HTTPS policy, proxy trust, and allowed YouTube/media destinations |
-| `ACCESS_RESTRICTED` | Upstream content or automated-access restriction; do not bypass it |
-| `UNSUPPORTED_FORMAT` | `yt-dlp` could not supply compatible output streams or a matching compatible output |
-| `QUEUE_FULL` / `RATE_LIMITED` | Worker, queue, storage, retention, and request-rate limits; back off before retrying |
+| `GCP_CONTROLLER_URL` | HTTPS origin of the separately deployed VM controller |
+| `GCP_CONTROLLER_TOKEN` | Separate controller secret, at least 32 visible ASCII characters |
+| `GCP_WORKER_URL` | HTTPS origin of the Cloudflare-protected worker |
+| `GCP_WORKER_TOKEN` | Matches the worker's own `API_TOKEN`; separate from the public API token |
+| `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET` | Cloudflare Access service-token credentials |
+| `GCP_IDLE_TIMEOUT_SECS` | Idle shutdown delay; default `300` |
+| `GCP_START_TIMEOUT_SECS` | Worker startup budget; default `300` |
+| `GCP_MAX_JOB_ATTEMPTS` | Extraction attempts including the first; default `2`, allowed `1`–`3` |
+
+Controller and worker URLs must be HTTPS origins without paths, queries or embedded
+credentials. Railway sends `X-Controller-Token` to the controller; it does not hold a
+Google service-account key. The controller needs an attached identity allowed to
+inspect/start/stop its configured VM. Its implementation is not included here.
+
+The worker runs in local mode, bound to loopback behind `cloudflared`. Follow
+[the worker setup guide](gcp-worker/README.md) for packaging, Ubuntu/systemd setup,
+controller responses and upgrades. Idle shutdown is best effort; maintain an
+independent VM maximum-runtime stop policy. Stopped VMs can still incur disk and
+other provisioned-resource costs.
+
+### Configuration and troubleshooting
+
+[`.env.example`](.env.example) lists the common settings. These defaults are useful
+starting points; adjust them to your machine and workload:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `API_TOKEN` / `ALLOW_UNAUTHENTICATED` | Required / `false` | Keep authentication enabled outside deliberate local development |
+| `PORT` / `BIND_HOST` | `8080` / `0.0.0.0` | Listener address |
+| `DATA_DIR` | `data` (Docker: `/data`) | Job records, temporary work and finished files |
+| `WORKERS` / `QUEUE_CAPACITY` / `MAX_JOBS` | `2` / `16` / `256` | Active jobs, waiting jobs and retained records |
+| `MAX_DOWNLOAD_BYTES` | 1 GiB | Per-job media workspace budget |
+| `MAX_STORAGE_BYTES` | 8 GiB | Logical reservations and retained-output budget |
+| `JOB_TTL_SECS` | `3600` | Terminal-job retention in seconds |
+| `REQUESTS_PER_MINUTE` / `MAX_CONCURRENT_REQUESTS` | `120` / `32` | Shared API request limits, including polling and files |
+| `CONNECT_TIMEOUT_SECS` / `REQUEST_TIMEOUT_SECS` | `10` / `30` | General connection setting / API handler deadline; remote transport has separate limits |
+| `DOWNLOAD_TIMEOUT_SECS` / `STALL_TIMEOUT_SECS` | `1800` / `180` | Job deadline / yt-dlp no-file-growth timeout |
+| `YTDLP_PATH` / `YTDLP_JS_RUNTIME` | `yt-dlp` / `deno` | Extractor executable and JavaScript runtime |
+| `YTDLP_PROXY` / `YTDLP_PROXY_REQUIRED` | Unset / off | Optional server-configured proxy / require local WARP readiness |
+| `RUST_LOG` | `info` | Structured service log filtering |
+| `FFMPEG_PATH` / `FFPROBE_PATH` | `ffmpeg` / `ffprobe` | Media tool executables |
+
+Storage reservations can reject jobs before the queue fills. Allow space for source
+files and output to coexist during processing. Cold remote metadata requests can
+exceed the default 30-second API handler deadline; set `REQUEST_TIMEOUT_SECS` and
+client/proxy deadlines to cover the expected startup time when needed.
+
+If `/health` returns `503`, check writable storage and FFmpeg/ffprobe. On workers
+with `YTDLP_PROXY_REQUIRED=true`, readiness also checks the local SOCKS listener and
+WARP connection status. Health does not contact YouTube, validate remote controller
+access or prove an end-to-end download works.
+
+For controller failures, inspect the method, path, HTTP status and hint in the job
+error and correlate its `job_id` with `youtube_extractor::remote` logs. Keep tokens,
+headers, signed media URLs and private video links out of shared logs. Older
+architecture/operations notes include WARP-specific setups; use the current worker
+environment example and setup script for the default direct-egress configuration.
 
 ## Development and verification
-
-The [offline eval suite](evals/README.md) scores extraction and remote transport
-scenarios against production Rust code, with per-case JSON results and optional
-baseline comparison:
-
-```bash
-python3 evals/run.py --out work/evals
-```
-
-It uses synthetic inputs and loopback workers, requires no cloud credentials, and
-does not establish live YouTube or deployed infrastructure compatibility.
 
 ```bash
 cargo fmt --all -- --check
@@ -225,92 +278,21 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
 node --check web/app.js
 node --test tests/frontend/*.test.mjs
+python3 evals/run.py --out work/evals
 ```
 
-Deterministic tests use controlled fixtures and test media rather than external YouTube access. To check the container:
+Deterministic tests use fixtures, synthetic subprocesses, media and loopback HTTP.
+The [eval guide](evals/README.md) explains scenario selection and reports. CI also
+builds the Docker image and runs `scripts/smoke-container.sh` for health and
+authentication checks. These checks do not establish live YouTube access.
 
-```bash
-docker build -t youtube-extractor:local .
-IMAGE=youtube-extractor:local bash scripts/smoke-container.sh
-```
+For live verification, select an authorized test video, export `BASE_URL`,
+`API_TOKEN`, `YOUTUBE_TEST_URL` and `ALLOW_EXTERNAL_YOUTUBE=1`, then run
+`bash scripts/smoke-youtube.sh` (or `bash scripts/smoke-railway.sh`). The script checks
+metadata and real MP3/MP4 files with `ffprobe`. Historical results in
+[docs/test-results.md](docs/test-results.md) describe earlier revisions, not current
+deployment acceptance.
 
-CI runs formatting, Clippy, tests, the Docker build and deterministic container health/authentication checks. External checks are explicitly opted in:
-
-```bash
-export BASE_URL=http://127.0.0.1:8080
-export YOUTUBE_TEST_URL='https://www.youtube.com/watch?v=AUTHORIZED_VIDEO_ID'
-export ALLOW_EXTERNAL_YOUTUBE=1
-# API_TOKEN must already be set securely in your environment.
-bash scripts/smoke-youtube.sh
-```
-
-The external script verifies metadata, creates and polls MP3 and MP4 jobs, downloads actual bytes, checks audio/video streams and duration with `ffprobe`, and deletes the completed jobs. It saves structured error responses when compatibility fails. Run the same check through `scripts/smoke-railway.sh` against an explicitly selected Railway service. See [test results](docs/test-results.md) for the evidence available for this revision.
-
-The optional metadata-only probe runs with `AUTHORIZED_TEST_YOUTUBE_URL` set and `cargo test --locked --test external_metadata -- --ignored`. It does not verify media downloading. Player fixtures represent the native `ytInitialPlayerResponse` JSON parser; when updating fixtures, preserve a minimal reproducible player shape and strip signed media URLs, tokens, personal data and upstream page bodies. Synthetic fixtures demonstrate parser behavior rather than live compatibility.
-
-## Scope and operation
-
-The initial service uses a bounded in-process worker pool and a bounded queue, streamed downloads with per-job limits, local job/output storage, cancellation and expiration. It is independently deployable from other applications. Local state requires one replica and a persistent volume on Railway; it does not implement distributed job ownership or an S3 backend. Callbacks and signed webhook delivery are future API extensions.
-
-Do not count the writable container layer as durable storage. Mount `/data`, retain an appropriate disk budget, and follow the restart/recovery behavior in the deployment guide. Live YouTube compatibility and deployment status must be assessed separately from local tests.
-
-## On-demand Compute Engine extraction (branch-only)
-
-To keep Railway always available but only pay for GCP while downloading, set
-`EXTRACTOR_MODE=remote` on Railway and follow [gcp-worker/README.md](gcp-worker/README.md).
-Read the [architecture](docs/architecture.md) and
-[GCP, Tunnel, Access and WARP operations guide](docs/gcp-cloudflare-operations.md)
-for the trust boundaries, lifecycle constraints, setup order and acceptance checks.
-Stopping Compute Engine avoids running compute charges; persistent disks and
-other provisioned resources can still incur charges while the VM is stopped.
-The same Rust binary is packaged by `gcp-worker/package.sh` and installed
-as a GCP-only service; this preserves the existing authenticated v1 API and
-UI. GCP uses `YTDLP_PROXY=socks5://127.0.0.1:40000`, while Railway starts
-and stops the VM through a separately provisioned **keyless Google Cloud Run
-controller**. Set `GCP_CONTROLLER_URL` to its HTTPS origin (no credentials, path,
-query or fragment) and `GCP_CONTROLLER_TOKEN` to a separate random secret of at
-least 32 visible ASCII characters. Railway sends `X-Controller-Token` on every
-controller request; it does not call Google OAuth or Compute Engine directly.
-
-The controller binds one project, zone and VM in its own configuration and uses
-its attached Cloud Run runtime service identity with narrowly scoped
-`compute.instances.get`, `compute.instances.start` and `compute.instances.stop`
-permissions. No service-account private key belongs on Railway.
-
-| Controller request | Required response |
-| --- | --- |
-| `GET /status` | `200` with JSON such as `{"status":"RUNNING"}` or another Compute Engine state |
-| `POST /start` / `POST /stop` | `202` accepted, `200` already in desired state, or `409` while a lifecycle transition is in progress |
-
-Readiness polling remains bounded by `GCP_START_TIMEOUT_SECS`. The lifecycle
-mutex, queued jobs, worker Cloudflare Access authentication, file transfer,
-bounded retries, cancellation and idle shutdown remain in place. Controller
-requests use bounded HTTP timeouts and reject redirects; malformed or unavailable
-responses fail safely. Keep one Railway replica and a persistent `DATA_DIR`.
-
-When migrating, replace `GCP_SERVICE_ACCOUNT_JSON` with the two controller
-variables, remove Railway's old project/zone/instance variables, and revoke the
-old service-account key after confirming the controller works. Do not enable
-remote mode until the controller, worker, WARP, Cloudflare Tunnel/Access and
-IAM are configured. See the worker guide for the full configuration and
-controller authentication requirements.
-
-### Diagnose a controller lifecycle failure
-
-The old `VM controller rejected lifecycle request` message means a controller
-`POST /start` or `POST /stop` returned a status outside `200`, `202` and `409`.
-During a failed download this is likely `/start`; the message alone does not
-identify the status or cause. Updated errors include the method, path, HTTP
-status and a safe troubleshooting hint, including failures returned inside an
-otherwise successful job-status poll.
-
-Redeploy Railway from the pushed `fix/rust-yt-bot` commit, open browser DevTools
-**Console**, enable **Preserve log**, filter for `[Frame]`, and reproduce once.
-Enable the Console's **Verbose** level to see debug polling messages. Correlate
-the safe `job_id` with Railway logs from `youtube_extractor::remote`: controller
-events include `operation`, `method`, `path`, `http_status` and `elapsed_ms`,
-and the `remote_job` span carries `job_id`. `RUST_LOG=info` shows lifecycle
-stages; `RUST_LOG=info,youtube_extractor::remote=debug` also shows idle-skip
-reasons. See the [controller troubleshooting table](gcp-worker/README.md#controller-lifecycle-failures)
-for status-specific checks. Share only these safe diagnostics; never paste
-tokens, raw request headers/bodies or video URLs into logs or reports.
+For contributor guidance, see [AGENTS.md](AGENTS.md). The [API reference](docs/api.md),
+[architecture notes](docs/architecture.md) and [deployment guide](docs/deployment.md)
+provide further implementation and operational context.

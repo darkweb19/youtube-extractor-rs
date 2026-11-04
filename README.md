@@ -229,8 +229,12 @@ inspect/start/stop its configured VM. Its implementation is not included here.
 The worker runs in local mode, bound to loopback behind `cloudflared`. Follow
 [the worker setup guide](gcp-worker/README.md) for packaging, Ubuntu/systemd setup,
 controller responses and upgrades. Idle shutdown is best effort; maintain an
-independent VM maximum-runtime stop policy. Stopped VMs can still incur disk and
-other provisioned-resource costs.
+independent VM maximum-runtime stop policy. Railway stops only a VM it started,
+after the configured idle interval (five minutes by default, checked every 15
+seconds). A manually started VM stays under manual control. Ownership is tied to
+the worker's boot identity and persists until shutdown is confirmed; an accepted
+stop request alone does not clear it. Stopped VMs can still incur disk and other
+provisioned-resource costs.
 
 ### Configuration and troubleshooting
 

@@ -197,6 +197,14 @@ used.
 The separately deployed controller implements `GET /status` with `200` JSON
 containing a Compute Engine `status`, and `POST /start` / `POST /stop` with
 `200` (already satisfied), `202` (accepted), or `409` (transitioning).
+Only a `202` start grants ownership; a `200` already-running reply must not claim
+an externally started VM. Pin ownership to the first verified worker boot and
+revoke both persisted and in-memory ownership on a different boot. Retain that
+ownership after stop acceptance until `TERMINATED` is observed; repeat idle
+checks and retry if the same owned boot remains running. Missing/unverifiable
+boot identity must block automatic shutdown. Keep worker activity probes bounded
+including response-body reads.
+
 Controller HTTP uses a 10-second connection timeout, 45-second request timeout
 and no redirects; status bodies are bounded. Worker HTTP also rejects redirects.
 Access credentials and worker bearer authentication belong only on the

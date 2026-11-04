@@ -88,17 +88,41 @@ Verify `systemctl is-enabled youtube-extractor cloudflared`; WARP is optional.
 Railway's `EXTRACTOR_MODE=remote` starts the VM through the keyless Cloud Run controller,
 waits for RUNNING + `/health`, then submits jobs to the worker's existing
 bounded Tokio queue. Queued jobs use UUIDs. Railway transfers outputs to its
-own storage before declaring success. Railway stops the VM after 300 seconds without active operations **only for a
-VM it started**. A manually started VM remains running for troubleshooting.
-After an accepted controller `POST /start`, Railway records the worker's Linux
-boot ID in `DATA_DIR/.railway-vm-ownership` (persistent volume required). On
-a Railway process restart, the idle watcher validates that the live worker still
+own storage before declaring success. Railway stops the VM after 300 seconds
+without active operations **only for a VM it started**. A manually started VM remains running for troubleshooting.
+After a controller `POST /start` returns `202` (a new start), Railway records
+the worker's Linux boot ID in `DATA_DIR/.railway-vm-ownership` (persistent volume
+required). On a Railway process restart, the idle watcher validates that the live worker still
 has that boot ID before issuing `POST /stop`. A VM manually rebooted after the
 original Railway start has a different boot ID and is never stopped using a
 stale ownership marker. If ownership cannot be verified or the worker activity
 check fails, shutdown fails closed. Use the independent GCP maximum runtime
 as a cost guard for these cases. If a new request arrives during a stop, it must
 wait and restart the same VM (never duplicate instances).
+
+The idle interval defaults to `GCP_IDLE_TIMEOUT_SECS=300` and is checked every
+15 seconds after active Railway operations finish. Worker jobs and in-flight
+file transfers also block shutdown. Retained completed files do not keep the VM
+running; Railway serves its own copy.
+
+A `200` response to `POST /start` means the VM was already running and does not
+grant Railway ownership. The controller must return `202` only when it actually
+initiates the start, so a concurrent manual start cannot become Railway-owned.
+A successful `POST /stop` means the request was accepted, not that the VM has
+stopped. Railway retains the boot-bound ownership record, checks subsequent VM
+state and retries while that same boot remains running. Ownership is cleared
+when the VM reaches `TERMINATED` or a different worker boot is observed. Missing
+boot identity, failed activity checks and unknown activity block shutdown safely.
+
+If the VM stays running beyond the idle interval, check Railway logs for
+`idle_shutdown_requested`, `controller_request_rejected`, `worker_activity_failed`,
+and `Idle VM stop attempt failed`. Enable
+`RUST_LOG=info,youtube_extractor::remote=debug` to see `idle_shutdown_skipped`
+reasons. Confirm the controller supports stop with its VM identity/IAM, the worker
+provides `boot_id` on health and activity replies, and `DATA_DIR` is persistent.
+Deploy the current worker binary if those fields are missing; do not fabricate
+ownership for an already running VM. Start a new verification cycle with the VM
+stopped, then submit a job through Railway.
 
 **Configure an independent GCP maximum VM run duration** with termination
 action STOP, e.g.:

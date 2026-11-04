@@ -167,10 +167,11 @@ struct Instance {
 struct Activity<'a>(&'a Remote);
 impl Drop for Activity<'_> {
     fn drop(&mut self) {
-        self.0.active.fetch_sub(1, Ordering::SeqCst);
         if let Ok(mut last) = self.0.last_activity.lock() {
             *last = Instant::now();
         }
+        // Publish the refreshed idle interval before exposing zero active work.
+        self.0.active.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -380,19 +381,18 @@ impl Remote {
                     http_status = response.status().as_u16(),
                     "VM lifecycle request accepted"
                 );
-                match action {
-                    ControllerOperation::Start => {
+                if matches!(action, ControllerOperation::Start) {
+                    // 200 means already running: a manual start may have raced
+                    // our status check. Only an accepted new start grants ownership.
+                    self.auto_started.store(false, Ordering::SeqCst);
+                    self.clear_ownership().await?;
+                    if response.status() == StatusCode::ACCEPTED {
                         self.auto_started.store(true, Ordering::SeqCst);
                     }
-                    ControllerOperation::Stop => {
-                        self.auto_started.store(false, Ordering::SeqCst);
-                        if let Err(error) = self.clear_ownership().await {
-                            tracing::warn!(event = "vm_ownership_clear_failed",
-                                error_code = ?error.code, "Could not clear VM ownership record");
-                        }
-                    }
-                    ControllerOperation::Status => {}
                 }
+                // A stop reply only accepts an asynchronous lifecycle request.
+                // Retain ownership until status confirms TERMINATED so a failed
+                // or incomplete operation can be retried by the idle watcher.
                 Ok(LifecycleReply::Accepted)
             }
             StatusCode::CONFLICT => {
@@ -513,9 +513,27 @@ impl Remote {
                             .and_then(|value| Uuid::parse_str(value).ok())
                     });
                     if let Some(boot_id) = boot_id {
-                        if let Err(error) = self.save_ownership(boot_id).await {
-                            tracing::warn!(event = "vm_ownership_save_failed",
-                                error_code = ?error.code, "VM ownership not persisted");
+                        match self.read_ownership().await {
+                            Ok(Some(expected)) if expected != boot_id => {
+                                // Readiness checks must never transfer ownership
+                                // from an earlier boot to a manually restarted VM.
+                                self.auto_started.store(false, Ordering::SeqCst);
+                                self.clear_ownership().await.ok();
+                                tracing::warn!(
+                                    event = "vm_ownership_revoked",
+                                    reason = "vm_boot_id_changed",
+                                    "VM remains under external control"
+                                );
+                            }
+                            Ok(None) => {
+                                if let Err(error) = self.save_ownership(boot_id).await {
+                                    tracing::warn!(event = "vm_ownership_save_failed",
+                                        error_code = ?error.code, "VM ownership not persisted");
+                                }
+                            }
+                            Ok(Some(_)) => (),
+                            Err(error) => tracing::warn!(event = "vm_ownership_read_failed",
+                                error_code = ?error.code, "Cannot verify VM ownership"),
                         }
                     } else {
                         tracing::warn!(
@@ -613,13 +631,19 @@ impl Remote {
             loop {
                 tick.tick().await;
                 if let Err(err) = this.stop_if_idle().await {
-                    tracing::warn!(code=?err.code, "Idle VM stop attempt failed");
+                    tracing::warn!(code=?err.code, message=%err.message, "Idle VM stop attempt failed");
                 }
             }
         });
     }
 
     async fn worker_activity(&self) -> Result<(bool, Option<Uuid>)> {
+        tokio::time::timeout(Duration::from_secs(7), self.fetch_worker_activity())
+            .await
+            .map_err(|_| bad("GCP worker activity check timed out; idle shutdown blocked"))?
+    }
+
+    async fn fetch_worker_activity(&self) -> Result<(bool, Option<Uuid>)> {
         let response = self
             .worker_req(Method::GET, "/api/v1/internal/activity")
             .send()
@@ -722,10 +746,18 @@ impl Remote {
                         "Previously owned VM boot cannot be verified"
                     );
                     if observed_boot.is_some() {
+                        self.auto_started.store(false, Ordering::SeqCst);
                         self.clear_ownership().await?;
                     }
                     return Ok(());
                 }
+            } else {
+                tracing::warn!(
+                    event = "idle_shutdown_skipped",
+                    reason = "missing_owned_boot_id",
+                    "Cannot verify ownership of current VM boot"
+                );
+                return Ok(());
             }
             if busy {
                 tracing::debug!(
@@ -1615,6 +1647,7 @@ mod tests {
 
     #[tokio::test]
     async fn idle_shutdown_defers_conflicts_and_never_stops_active_or_busy_work() {
+        let boot_id = Uuid::new_v4();
         let controller = mock(vec![
             Reply::state("RUNNING"),
             Reply::state("RUNNING"),
@@ -1624,13 +1657,23 @@ mod tests {
         ])
         .await;
         let worker = mock(vec![
-            Reply::new(StatusCode::OK, r#"{"busy":true}"#),
-            Reply::new(StatusCode::OK, r#"{"busy":false}"#),
-            Reply::new(StatusCode::OK, r#"{"busy":false}"#),
+            Reply::new(
+                StatusCode::OK,
+                format!(r#"{{"busy":true,"boot_id":"{boot_id}"}}"#),
+            ),
+            Reply::new(
+                StatusCode::OK,
+                format!(r#"{{"busy":false,"boot_id":"{boot_id}"}}"#),
+            ),
+            Reply::new(
+                StatusCode::OK,
+                format!(r#"{{"busy":false,"boot_id":"{boot_id}"}}"#),
+            ),
         ])
         .await;
         let (remote, _dir) = remote(&controller, &worker).await;
         remote.auto_started.store(true, Ordering::SeqCst);
+        remote.save_ownership(boot_id).await.unwrap();
         {
             let _activity = remote.activity();
             expire_idle(&remote);
@@ -1664,6 +1707,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accepted_stop_retains_ownership_until_vm_is_confirmed_stopped() {
+        let boot_id = Uuid::new_v4();
+        let controller = mock(vec![
+            Reply::state("RUNNING"),
+            Reply::new(StatusCode::ACCEPTED, ""),
+            Reply::state("RUNNING"),
+            Reply::new(StatusCode::ACCEPTED, ""),
+            Reply::state("STOPPING"),
+            Reply::state("TERMINATED"),
+        ])
+        .await;
+        let worker = mock(vec![
+            Reply::new(
+                StatusCode::OK,
+                format!(r#"{{"busy":false,"boot_id":"{boot_id}"}}"#),
+            ),
+            Reply::new(
+                StatusCode::OK,
+                format!(r#"{{"busy":false,"boot_id":"{boot_id}"}}"#),
+            ),
+        ])
+        .await;
+        let (remote, _dir) = remote(&controller, &worker).await;
+        remote.auto_started.store(true, Ordering::SeqCst);
+        remote.save_ownership(boot_id).await.unwrap();
+        expire_idle(&remote);
+        remote.stop_if_idle().await.unwrap();
+        assert!(remote.auto_started.load(Ordering::SeqCst));
+        assert_eq!(remote.read_ownership().await.unwrap(), Some(boot_id));
+        // A controller response accepts an operation; it does not prove the VM stopped.
+        remote.stop_if_idle().await.unwrap();
+        remote.stop_if_idle().await.unwrap();
+        assert_eq!(remote.read_ownership().await.unwrap(), Some(boot_id));
+        remote.stop_if_idle().await.unwrap();
+        assert!(!remote.auto_started.load(Ordering::SeqCst));
+        assert_eq!(remote.read_ownership().await.unwrap(), None);
+        assert_eq!(
+            controller
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.path == "/stop")
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_reboot_revokes_both_live_and_durable_ownership() {
+        let boot_id = Uuid::new_v4();
+        let controller = mock(vec![Reply::state("RUNNING")]).await;
+        let worker = mock(vec![
+            Reply::new(
+                StatusCode::OK,
+                format!(r#"{{"busy":false,"boot_id":"{boot_id}"}}"#),
+            ),
+            Reply::new(
+                StatusCode::OK,
+                format!(r#"{{"status":"ok","boot_id":"{boot_id}"}}"#),
+            ),
+        ])
+        .await;
+        let (remote, _dir) = remote(&controller, &worker).await;
+        remote.auto_started.store(true, Ordering::SeqCst);
+        remote.save_ownership(Uuid::new_v4()).await.unwrap();
+        expire_idle(&remote);
+        remote.stop_if_idle().await.unwrap();
+        assert!(!remote.auto_started.load(Ordering::SeqCst));
+        assert!(remote.worker_ready().await);
+        assert_eq!(remote.read_ownership().await.unwrap(), None);
+        remote.stop_if_idle().await.unwrap();
+        assert_eq!(controller.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn health_check_cannot_transfer_ownership_to_a_manual_reboot() {
+        let boot_id = Uuid::new_v4();
+        let controller = mock(vec![]).await;
+        let worker = mock(vec![Reply::new(
+            StatusCode::OK,
+            format!(r#"{{"status":"ok","boot_id":"{boot_id}"}}"#),
+        )])
+        .await;
+        let (remote, _dir) = remote(&controller, &worker).await;
+        remote.auto_started.store(true, Ordering::SeqCst);
+        remote.save_ownership(Uuid::new_v4()).await.unwrap();
+        assert!(remote.worker_ready().await);
+        assert!(!remote.auto_started.load(Ordering::SeqCst));
+        assert_eq!(remote.read_ownership().await.unwrap(), None);
+        expire_idle(&remote);
+        remote.stop_if_idle().await.unwrap();
+        assert!(controller.requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn already_running_start_reply_never_claims_manual_vm() {
+        let boot_id = Uuid::new_v4();
+        let controller = mock(vec![Reply::new(StatusCode::OK, "")]).await;
+        let worker = mock(vec![Reply::new(
+            StatusCode::OK,
+            format!(r#"{{"status":"ok","boot_id":"{boot_id}"}}"#),
+        )])
+        .await;
+        let (remote, _dir) = remote(&controller, &worker).await;
+        assert_eq!(
+            remote.vm_action(ControllerOperation::Start).await.unwrap(),
+            LifecycleReply::Accepted
+        );
+        assert!(!remote.auto_started.load(Ordering::SeqCst));
+        assert!(remote.worker_ready().await);
+        assert_eq!(remote.read_ownership().await.unwrap(), None);
+        expire_idle(&remote);
+        remote.stop_if_idle().await.unwrap();
+        assert_eq!(controller.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unpinned_start_cannot_stop_an_unverified_boot() {
+        let controller = mock(vec![Reply::state("RUNNING")]).await;
+        let worker = mock(vec![Reply::new(StatusCode::OK, r#"{"busy":false}"#)]).await;
+        let (remote, _dir) = remote(&controller, &worker).await;
+        remote.auto_started.store(true, Ordering::SeqCst);
+        expire_idle(&remote);
+        remote.stop_if_idle().await.unwrap();
+        assert!(!controller
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.path == "/stop"));
+    }
+
+    #[tokio::test]
     async fn manual_vm_start_is_never_stopped_by_idle_watcher() {
         let controller = mock(vec![]).await;
         let worker = mock(vec![]).await;
@@ -1681,6 +1858,7 @@ mod tests {
         let controller = mock(vec![
             Reply::state("RUNNING"),
             Reply::new(StatusCode::ACCEPTED, ""),
+            Reply::state("TERMINATED"),
         ])
         .await;
         let worker = mock(vec![Reply::new(
@@ -1700,6 +1878,8 @@ mod tests {
             .unwrap()
             .iter()
             .any(|r| r.path == "/stop"));
+        assert_eq!(remote.read_ownership().await.unwrap(), Some(boot_id));
+        remote.stop_if_idle().await.unwrap();
         assert_eq!(remote.read_ownership().await.unwrap(), None);
     }
 
@@ -1738,6 +1918,35 @@ mod tests {
         remote.auto_started.store(true, Ordering::SeqCst);
         assert!(remote.worker_ready().await);
         assert_eq!(remote.read_ownership().await.unwrap(), Some(boot_id));
+    }
+
+    #[tokio::test]
+    async fn worker_activity_deadline_covers_a_stalled_response_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        let app = Router::new().fallback(|| async {
+            Body::from_stream(futures_util::stream::once(async {
+                std::future::pending::<std::result::Result<bytes::Bytes, std::io::Error>>().await
+            }))
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let controller = mock(vec![]).await;
+        let worker = mock(vec![]).await;
+        let (mut remote, _dir) = remote(&controller, &worker).await;
+        let client = Arc::get_mut(&mut remote).unwrap();
+        client.settings.worker = origin;
+        client.worker = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(9), remote.worker_activity()).await;
+        server.abort();
+        let error = result
+            .expect("activity deadline must cover body consumption")
+            .unwrap_err();
+        assert!(error.message.contains("timed out"));
+        assert!(controller.requests.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

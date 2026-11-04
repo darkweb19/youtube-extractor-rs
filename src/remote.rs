@@ -1650,6 +1650,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn railway_restart_recovers_ownership_for_same_gcp_boot() {
+        let boot_id = Uuid::new_v4();
+        let controller = mock(vec![
+            Reply::state("RUNNING"),
+            Reply::new(StatusCode::ACCEPTED, ""),
+        ]).await;
+        let worker = mock(vec![Reply::new(StatusCode::OK, format!(
+            r#"{{"busy":false,"boot_id":"{boot_id}"}}"#
+        ))]).await;
+        let (remote, _dir) = remote(&controller, &worker).await;
+        remote.save_ownership(boot_id).await.unwrap();
+        // Simulate a fresh Railway process: no in-memory ownership.
+        assert!(!remote.auto_started.load(Ordering::SeqCst));
+        expire_idle(&remote);
+        remote.stop_if_idle().await.unwrap();
+        assert!(controller.requests.lock().unwrap().iter().any(|r| r.path == "/stop"));
+        assert_eq!(remote.read_ownership().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn stale_ownership_cannot_stop_manually_restarted_vm() {
+        let controller = mock(vec![Reply::state("RUNNING")]).await;
+        let new_boot_id = Uuid::new_v4();
+        let worker = mock(vec![Reply::new(StatusCode::OK, format!(
+            r#"{{"busy":false,"boot_id":"{new_boot_id}"}}"#
+        ))]).await;
+        let (remote, _dir) = remote(&controller, &worker).await;
+        remote.save_ownership(Uuid::new_v4()).await.unwrap();
+        expire_idle(&remote);
+        remote.stop_if_idle().await.unwrap();
+        assert!(!controller.requests.lock().unwrap().iter().any(|r| r.path == "/stop"));
+        assert_eq!(remote.read_ownership().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn worker_health_records_ownership_when_railway_requested_start() {
+        let boot_id = Uuid::new_v4();
+        let controller = mock(vec![]).await;
+        let worker = mock(vec![Reply::new(StatusCode::OK, format!(
+            r#"{{"status":"ok","boot_id":"{boot_id}"}}"#
+        ))]).await;
+        let (remote, _dir) = remote(&controller, &worker).await;
+        remote.auto_started.store(true, Ordering::SeqCst);
+        assert!(remote.worker_ready().await);
+        assert_eq!(remote.read_ownership().await.unwrap(), Some(boot_id));
+    }
+
+    #[tokio::test]
     async fn idle_shutdown_fails_closed_when_worker_activity_is_unknown() {
         let controller = mock(vec![Reply::state("RUNNING")]).await;
         let worker = mock(vec![Reply::new(StatusCode::OK, "{}")]).await;

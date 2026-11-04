@@ -90,7 +90,7 @@ Railway's `EXTRACTOR_MODE=remote` starts the VM through the keyless Cloud Run co
 waits for RUNNING + `/health`, then submits jobs to the worker's existing
 bounded Tokio queue. Queued jobs use UUIDs. Railway transfers outputs to its
 own storage before declaring success. Railway stops the VM after 300 seconds
-without active operations. If a new request arrives during a stop, it must
+without active operations **only when the running Railway process started the VM itself**. A manually started VM is left running for troubleshooting. After a Railway restart, the new process also leaves an already-running VM untouched; configure an independent GCP maximum-runtime guard to limit costs. If a new request arrives during a stop, it must
 wait and restart the same VM (never duplicate instances).
 
 **Configure an independent GCP maximum VM run duration** with termination

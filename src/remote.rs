@@ -755,7 +755,15 @@ impl Remote {
                         let output = view.output.ok_or_else(|| bad("Worker returned no completed file"))?;
                         return self.retrieve(local, remote, &output, cancel).await;
                     }
-                    JobState::Failed => return Err(AppError::new(ErrorCode::DownloadInterrupted, "GCP download failed")),
+                    JobState::Failed => {
+                        // Preserve the worker's typed error code instead of flattening
+                        // every failure to DOWNLOAD_INTERRUPTED. Never trust its text.
+                        let code = view.error.as_ref().map(|error| error.code)
+                            .unwrap_or(ErrorCode::DownloadInterrupted);
+                        tracing::warn!(event = "worker_job_failed", worker_job_id = %remote,
+                            worker_error_code = ?code, "GCP worker reported a failed download");
+                        return Err(AppError::new(code, "GCP worker download failed"));
+                    },
                     JobState::Cancelled => return Err(AppError::new(ErrorCode::Cancelled, "GCP download cancelled")),
                     JobState::Queued | JobState::Running => (),
                 }

@@ -389,6 +389,39 @@ async fn dispatch_accepts_http_202_with_worker_auth_and_idempotency_key() {
     assert_eq!(requests[2].method, Method::DELETE);
 }
 
+#[tokio::test]
+async fn worker_access_restriction_is_preserved_without_leaking_worker_text() {
+    let id = Uuid::new_v4();
+    let accepted = worker_test_view(id, JobState::Queued, 0, None, None);
+    let mut failed = worker_test_view(id, JobState::Failed, 0, None, None);
+    failed.error = Some(JobError {
+        code: ErrorCode::AccessRestricted,
+        message: "private signed URL: https://example.test/?token=secret".into(),
+    });
+    let controller = mock(vec![]).await;
+    let worker = mock(vec![
+        worker_test_reply(StatusCode::ACCEPTED, &accepted),
+        worker_test_reply(StatusCode::OK, &failed),
+        Reply::new(StatusCode::NO_CONTENT, ""),
+    ])
+    .await;
+    let (client, _dir) = remote(&controller, &worker).await;
+    let (progress, _) = watch::channel(DownloadProgress::default());
+    let error = client
+        .run_attempt(
+            &worker_test_request(),
+            id,
+            id,
+            &CancellationToken::new(),
+            &progress,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::AccessRestricted);
+    assert!(!error.message.contains("secret"));
+    assert_eq!(worker.requests.lock().unwrap().len(), 3);
+}
+
 // Group 3: active states map to the controller progress type while preserving
 // byte counts; the client derives the internal stage from the typed status.
 #[tokio::test]

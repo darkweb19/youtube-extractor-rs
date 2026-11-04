@@ -42,6 +42,10 @@ impl LocalStorage {
         Ok(Self { root })
     }
 
+    pub fn root_path(&self) -> &Path {
+        &self.root
+    }
+
     pub fn job_dir(&self, job: Uuid) -> PathBuf {
         self.root.join(job.to_string())
     }

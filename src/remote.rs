@@ -386,6 +386,10 @@ impl Remote {
                     }
                     ControllerOperation::Stop => {
                         self.auto_started.store(false, Ordering::SeqCst);
+                        if let Err(error) = self.clear_ownership().await {
+                            tracing::warn!(event = "vm_ownership_clear_failed",
+                                error_code = ?error.code, "Could not clear VM ownership record");
+                        }
                     }
                     ControllerOperation::Status => {}
                 }
@@ -417,6 +421,67 @@ impl Remote {
             .header("CF-Access-Client-Secret", &self.settings.access_secret)
     }
 
+    fn ownership_path(&self) -> std::path::PathBuf {
+        self.storage.root_path().join(".railway-vm-ownership")
+    }
+
+    async fn read_ownership(&self) -> Result<Option<Uuid>> {
+        let contents = match fs::read_to_string(self.ownership_path()).await {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => {
+                return Err(AppError::new(
+                    ErrorCode::Storage,
+                    "Cannot read VM ownership record",
+                ))
+            }
+        };
+        match Uuid::parse_str(contents.trim()) {
+            Ok(id) => Ok(Some(id)),
+            Err(_) => {
+                tracing::warn!(
+                    event = "vm_ownership_invalid",
+                    "Invalid VM ownership record; automatic stop blocked"
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    async fn save_ownership(&self, boot_id: Uuid) -> Result<()> {
+        let destination = self.ownership_path();
+        let temporary = self
+            .storage
+            .root_path()
+            .join(format!(".railway-vm-ownership-{}.tmp", Uuid::new_v4()));
+        fs::write(&temporary, boot_id.to_string())
+            .await
+            .map_err(|_| AppError::new(ErrorCode::Storage, "Cannot write VM ownership record"))?;
+        if fs::rename(&temporary, &destination).await.is_err() {
+            let _ = fs::remove_file(&temporary).await;
+            return Err(AppError::new(
+                ErrorCode::Storage,
+                "Cannot publish VM ownership record",
+            ));
+        }
+        tracing::info!(
+            event = "vm_ownership_saved",
+            "Railway VM ownership tied to the current GCP boot"
+        );
+        Ok(())
+    }
+
+    async fn clear_ownership(&self) -> Result<()> {
+        match fs::remove_file(self.ownership_path()).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(AppError::new(
+                ErrorCode::Storage,
+                "Cannot clear VM ownership record",
+            )),
+        }
+    }
+
     async fn worker_ready(&self) -> bool {
         let started = Instant::now();
         tracing::info!(
@@ -438,6 +503,28 @@ impl Remote {
                     elapsed_ms = started.elapsed().as_millis() as u64,
                     "Worker health check finished"
                 );
+                if ready && self.auto_started.load(Ordering::SeqCst) {
+                    // Only a successful Railway /start can create ownership.
+                    // The worker boot ID changes on every VM reboot, so a
+                    // subsequent manual start cannot inherit this permission.
+                    let boot_id = response.json::<Value>().await.ok().and_then(|body| {
+                        body.get("boot_id")
+                            .and_then(Value::as_str)
+                            .and_then(|value| Uuid::parse_str(value).ok())
+                    });
+                    if let Some(boot_id) = boot_id {
+                        if let Err(error) = self.save_ownership(boot_id).await {
+                            tracing::warn!(event = "vm_ownership_save_failed",
+                                error_code = ?error.code, "VM ownership not persisted");
+                        }
+                    } else {
+                        tracing::warn!(
+                            event = "vm_ownership_unrecorded",
+                            reason = "missing_worker_boot_id",
+                            "Auto-stop after Railway restart will require manual intervention"
+                        );
+                    }
+                }
                 ready
             }
             Ok(Err(error)) => {
@@ -532,7 +619,7 @@ impl Remote {
         });
     }
 
-    async fn worker_busy(&self) -> Result<bool> {
+    async fn worker_activity(&self) -> Result<(bool, Option<Uuid>)> {
         let response = self
             .worker_req(Method::GET, "/api/v1/internal/activity")
             .send()
@@ -561,7 +648,7 @@ impl Remote {
             );
             bad("Invalid GCP activity reply")
         })?;
-        activity
+        let busy = activity
             .get("busy")
             .and_then(Value::as_bool)
             .ok_or_else(|| {
@@ -571,7 +658,12 @@ impl Remote {
                     "Idle shutdown blocked by incomplete worker activity"
                 );
                 bad("GCP activity reply was incomplete")
-            })
+            })?;
+        let boot_id = activity
+            .get("boot_id")
+            .and_then(Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok());
+        Ok((busy, boot_id))
     }
 
     async fn stop_if_idle(&self) -> Result<()> {
@@ -592,9 +684,11 @@ impl Remote {
             );
             return Ok(());
         }
-        // A manually started VM is not owned by Railway. On Railway restart,
-        // ownership is intentionally lost, leaving GCP's runtime guard as fallback.
-        if !self.auto_started.load(Ordering::SeqCst) {
+        // A Railway restart restores ownership only from a durable boot-ID
+        // marker created after an accepted POST /start + healthy worker. A
+        // manually started VM never acquires such a marker.
+        let recovered_boot = self.read_ownership().await?;
+        if !self.auto_started.load(Ordering::SeqCst) && recovered_boot.is_none() {
             tracing::debug!(
                 event = "idle_shutdown_skipped",
                 reason = "vm_not_started_by_railway",
@@ -617,8 +711,23 @@ impl Remote {
         }
         let vm_state = self.vm_state().await?;
         if vm_state == "RUNNING" {
-            // Never stop untracked work after a Railway restart or lost callback.
-            if self.worker_busy().await? {
+            // Verify the live boot before trusting a recovered ownership
+            // marker; stale records cannot authorize stopping a manual reboot.
+            let (busy, observed_boot) = self.worker_activity().await?;
+            if let Some(expected) = recovered_boot {
+                if observed_boot != Some(expected) {
+                    tracing::warn!(
+                        event = "idle_shutdown_skipped",
+                        reason = "vm_boot_id_mismatch_or_missing",
+                        "Previously owned VM boot cannot be verified"
+                    );
+                    if observed_boot.is_some() {
+                        self.clear_ownership().await?;
+                    }
+                    return Ok(());
+                }
+            }
+            if busy {
                 tracing::debug!(
                     event = "idle_shutdown_skipped",
                     reason = "worker_busy",
@@ -643,6 +752,7 @@ impl Remote {
             // must not accidentally inherit permission for automatic shutdown.
             if vm_state == "TERMINATED" {
                 self.auto_started.store(false, Ordering::SeqCst);
+                self.clear_ownership().await?;
             }
             tracing::debug!(
                 event = "idle_shutdown_skipped",
@@ -755,7 +865,15 @@ impl Remote {
                         let output = view.output.ok_or_else(|| bad("Worker returned no completed file"))?;
                         return self.retrieve(local, remote, &output, cancel).await;
                     }
-                    JobState::Failed => return Err(AppError::new(ErrorCode::DownloadInterrupted, "GCP download failed")),
+                    JobState::Failed => {
+                        // Preserve the worker's typed error code instead of flattening
+                        // every failure to DOWNLOAD_INTERRUPTED. Never trust its text.
+                        let code = view.error.as_ref().map(|error| error.code)
+                            .unwrap_or(ErrorCode::DownloadInterrupted);
+                        tracing::warn!(event = "worker_job_failed", worker_job_id = %remote,
+                            worker_error_code = ?code, "GCP worker reported a failed download");
+                        return Err(AppError::new(code, "GCP worker download failed"));
+                    },
                     JobState::Cancelled => return Err(AppError::new(ErrorCode::Cancelled, "GCP download cancelled")),
                     JobState::Queued | JobState::Running => (),
                 }
@@ -1555,6 +1673,71 @@ mod tests {
         assert!(controller.requests.lock().unwrap().is_empty());
         assert!(worker.requests.lock().unwrap().is_empty());
         assert!(!remote.auto_started.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn railway_restart_recovers_ownership_for_same_gcp_boot() {
+        let boot_id = Uuid::new_v4();
+        let controller = mock(vec![
+            Reply::state("RUNNING"),
+            Reply::new(StatusCode::ACCEPTED, ""),
+        ])
+        .await;
+        let worker = mock(vec![Reply::new(
+            StatusCode::OK,
+            format!(r#"{{"busy":false,"boot_id":"{boot_id}"}}"#),
+        )])
+        .await;
+        let (remote, _dir) = remote(&controller, &worker).await;
+        remote.save_ownership(boot_id).await.unwrap();
+        // Simulate a fresh Railway process: no in-memory ownership.
+        assert!(!remote.auto_started.load(Ordering::SeqCst));
+        expire_idle(&remote);
+        remote.stop_if_idle().await.unwrap();
+        assert!(controller
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.path == "/stop"));
+        assert_eq!(remote.read_ownership().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn stale_ownership_cannot_stop_manually_restarted_vm() {
+        let controller = mock(vec![Reply::state("RUNNING")]).await;
+        let new_boot_id = Uuid::new_v4();
+        let worker = mock(vec![Reply::new(
+            StatusCode::OK,
+            format!(r#"{{"busy":false,"boot_id":"{new_boot_id}"}}"#),
+        )])
+        .await;
+        let (remote, _dir) = remote(&controller, &worker).await;
+        remote.save_ownership(Uuid::new_v4()).await.unwrap();
+        expire_idle(&remote);
+        remote.stop_if_idle().await.unwrap();
+        assert!(!controller
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.path == "/stop"));
+        assert_eq!(remote.read_ownership().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn worker_health_records_ownership_when_railway_requested_start() {
+        let boot_id = Uuid::new_v4();
+        let controller = mock(vec![]).await;
+        let worker = mock(vec![Reply::new(
+            StatusCode::OK,
+            format!(r#"{{"status":"ok","boot_id":"{boot_id}"}}"#),
+        )])
+        .await;
+        let (remote, _dir) = remote(&controller, &worker).await;
+        remote.auto_started.store(true, Ordering::SeqCst);
+        assert!(remote.worker_ready().await);
+        assert_eq!(remote.read_ownership().await.unwrap(), Some(boot_id));
     }
 
     #[tokio::test]

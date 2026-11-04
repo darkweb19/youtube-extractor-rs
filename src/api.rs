@@ -264,7 +264,22 @@ async fn health(State(state): State<ApiState>) -> Response {
 }
 fn health_response(ready: bool) -> Response {
     if ready {
-        (StatusCode::OK, Json(serde_json::json!({"status":"ok","storage":"local","durability":"requires_persistent_volume"}))).into_response()
+        {
+            // A per-boot identifier lets Railway recover VM ownership safely
+            // after a restart without treating later manual starts as its own.
+            let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                .ok()
+                .and_then(|value| Uuid::parse_str(value.trim()).ok())
+                .map(|id| id.to_string());
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status":"ok", "storage":"local",
+                    "durability":"requires_persistent_volume", "boot_id":boot_id
+                })),
+            )
+                .into_response()
+        }
     } else {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -297,7 +312,11 @@ async fn video_info(
 }
 async fn worker_activity(State(state): State<ApiState>) -> Json<serde_json::Value> {
     let active = state.jobs.has_activity().await;
-    Json(serde_json::json!({"busy": active}))
+    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .ok()
+        .and_then(|value| Uuid::parse_str(value.trim()).ok())
+        .map(|id| id.to_string());
+    Json(serde_json::json!({"busy": active, "boot_id": boot_id}))
 }
 async fn create_download(
     State(state): State<ApiState>,

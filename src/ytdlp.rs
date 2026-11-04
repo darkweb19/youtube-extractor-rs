@@ -22,6 +22,68 @@ use tokio::{io::AsyncReadExt, process::Command, sync::watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+// Drain stderr while yt-dlp runs to avoid pipe deadlocks. Keep only the final
+// 16 KiB, and never log raw stderr: it may contain signed playback URLs.
+async fn capture_ytdlp_stderr(mut stderr: tokio::process::ChildStderr) -> String {
+    const LIMIT: usize = 16 * 1024;
+    let mut tail = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        match stderr.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(count) => {
+                tail.extend_from_slice(&buffer[..count]);
+                if tail.len() > LIMIT {
+                    tail.drain(..tail.len() - LIMIT);
+                }
+            }
+        }
+    }
+    String::from_utf8_lossy(&tail).into_owned()
+}
+
+// Return only fixed, sanitized diagnostics. Do not expose yt-dlp's raw output
+// to Railway logs, API clients, or the web UI.
+fn classify_ytdlp_stderr(stderr: &str) -> (ErrorCode, &'static str, &'static str) {
+    let lower = stderr.to_lowercase();
+    if lower.contains("sign in to confirm")
+        || lower.contains("confirm you") && lower.contains("not a bot")
+        || lower.contains("login_required")
+    {
+        (
+            ErrorCode::AccessRestricted,
+            "bot_verification",
+            "YouTube requested verification of automated access",
+        )
+    } else if lower.contains("http error 429") || lower.contains("too many requests") {
+        (
+            ErrorCode::UpstreamRateLimited,
+            "rate_limited",
+            "YouTube temporarily rate-limited requests",
+        )
+    } else if lower.contains("http error 403") || lower.contains("forbidden") {
+        (
+            ErrorCode::AccessRestricted,
+            "http_403",
+            "YouTube denied access to the requested media",
+        )
+    } else if lower.contains("no supported javascript runtime")
+        || lower.contains("js challenge solver")
+    {
+        (
+            ErrorCode::PlayerChanged,
+            "javascript_challenge",
+            "YouTube player challenge could not be solved",
+        )
+    } else {
+        (
+            ErrorCode::AccessRestricted,
+            "upstream_rejection",
+            "yt-dlp could not access this YouTube media",
+        )
+    }
+}
+
 #[derive(Clone)]
 pub struct YtDlp {
     executable: PathBuf,
@@ -61,7 +123,7 @@ impl YtDlp {
             "--no-write-subs",
             "--no-write-auto-subs",
             "--js-runtimes",
-            "node",
+            &std::env::var("YTDLP_JS_RUNTIME").unwrap_or_else(|_| "deno".into()),
         ]);
         if let Ok(proxy) = std::env::var("YTDLP_PROXY") {
             if !proxy.is_empty() {
@@ -80,10 +142,17 @@ impl YtDlp {
         cmd.arg("--")
             .arg(format!("https://www.youtube.com/watch?v={id}"));
         const MAX_METADATA_BYTES: usize = 8 * 1024 * 1024;
-        cmd.stdout(Stdio::piped());
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd
             .spawn()
             .map_err(|_| AppError::new(ErrorCode::Internal, "yt-dlp executable is unavailable"))?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            AppError::new(
+                ErrorCode::Internal,
+                "yt-dlp metadata diagnostic pipe is unavailable",
+            )
+        })?;
+        let diagnostics = tokio::spawn(capture_ytdlp_stderr(stderr));
         let stdout = child.stdout.take().ok_or_else(|| {
             AppError::new(ErrorCode::Internal, "yt-dlp metadata pipe is unavailable")
         })?;
@@ -126,7 +195,17 @@ impl YtDlp {
             let _ = child.kill().await;
             let _ = child.wait().await;
         }
-        parse_info(&result?, id)
+        let stderr = diagnostics.await.unwrap_or_default();
+        let bytes = match result {
+            Err(error) if error.code == ErrorCode::AccessRestricted => {
+                let (code, reason, message) = classify_ytdlp_stderr(&stderr);
+                tracing::warn!(event = "ytdlp_metadata_rejected", reason, error_code = ?code,
+                    "yt-dlp metadata command failed");
+                return Err(AppError::new(code, message));
+            }
+            result => result?,
+        };
+        parse_info(&bytes, id)
     }
 
     fn download_command(&self, request: &DownloadRequest, dir: &Path) -> Result<Command> {
@@ -203,10 +282,14 @@ impl YtDlp {
         progress: &watch::Sender<DownloadProgress>,
     ) -> Result<StoredOutput> {
         let mut command = self.download_command(request, dir)?;
-        command.stdout(Stdio::null());
+        command.stdout(Stdio::null()).stderr(Stdio::piped());
         let mut child = command
             .spawn()
             .map_err(|_| AppError::new(ErrorCode::Internal, "yt-dlp executable is unavailable"))?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            AppError::new(ErrorCode::Internal, "yt-dlp diagnostic pipe is unavailable")
+        })?;
+        let diagnostics = tokio::spawn(capture_ytdlp_stderr(stderr));
         let stall_timeout = std::env::var("STALL_TIMEOUT_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -259,7 +342,16 @@ impl YtDlp {
             let _ = child.kill().await;
             let _ = child.wait().await;
         }
-        result?;
+        let stderr = diagnostics.await.unwrap_or_default();
+        match result {
+            Err(error) if error.code == ErrorCode::AccessRestricted => {
+                let (code, reason, message) = classify_ytdlp_stderr(&stderr);
+                tracing::warn!(event = "ytdlp_download_rejected", reason, error_code = ?code,
+                    "yt-dlp download command failed");
+                return Err(AppError::new(code, message));
+            }
+            result => result?,
+        }
         let ext = match request.kind {
             DownloadKind::Video if request.format == OutputFormat::Webm => "webm",
             DownloadKind::Video => "mp4",
@@ -475,6 +567,21 @@ impl JobExecutor for YtDlp {
 mod tests {
     use super::*;
     const ID: &str = "SAFrydhpgJo";
+
+    #[test]
+    fn ytdlp_stderr_is_classified_without_exposing_secret_urls() {
+        let secret = "https://googlevideo.example/videoplayback?token=secret123";
+        let (code, reason, message) = classify_ytdlp_stderr(&format!(
+            "ERROR: Sign in to confirm you're not a bot: {secret}"
+        ));
+        assert_eq!(code, ErrorCode::AccessRestricted);
+        assert_eq!(reason, "bot_verification");
+        assert!(!message.contains(secret));
+        assert_eq!(
+            classify_ytdlp_stderr("HTTP Error 429").0,
+            ErrorCode::UpstreamRateLimited
+        );
+    }
     #[test]
     fn metadata_never_exposes_upstream_signed_urls() {
         let json = serde_json::json!({"id":ID,"title":"Test",
@@ -562,7 +669,7 @@ mod tests {
         let args = tokio::fs::read_to_string(invoked).await.unwrap();
         assert!(args.contains("--ignore-config"));
         assert!(args.contains("--js-runtimes"));
-        assert!(args.contains("node"));
+        assert!(args.contains("deno"));
         assert!(args.contains("https://www.youtube.com/watch?v=SAFrydhpgJo"));
         assert!(!args.contains("youtu.be"));
         assert!(!args.contains("anything"));

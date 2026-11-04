@@ -615,7 +615,8 @@ impl Remote {
             );
             return Ok(());
         }
-        if self.vm_state().await? == "RUNNING" {
+        let vm_state = self.vm_state().await?;
+        if vm_state == "RUNNING" {
             // Never stop untracked work after a Railway restart or lost callback.
             if self.worker_busy().await? {
                 tracing::debug!(
@@ -638,6 +639,11 @@ impl Remote {
             }
             // A 409 leaves shutdown pending; the next idle tick checks state again.
         } else {
+            // Ownership expires if the VM has stopped. A later manual restart
+            // must not accidentally inherit permission for automatic shutdown.
+            if vm_state == "TERMINATED" {
+                self.auto_started.store(false, Ordering::SeqCst);
+            }
             tracing::debug!(
                 event = "idle_shutdown_skipped",
                 reason = "vm_not_running",

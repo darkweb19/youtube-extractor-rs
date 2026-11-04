@@ -403,12 +403,20 @@ async fn worker_access_restriction_is_preserved_without_leaking_worker_text() {
         worker_test_reply(StatusCode::ACCEPTED, &accepted),
         worker_test_reply(StatusCode::OK, &failed),
         Reply::new(StatusCode::NO_CONTENT, ""),
-    ]).await;
+    ])
+    .await;
     let (client, _dir) = remote(&controller, &worker).await;
     let (progress, _) = watch::channel(DownloadProgress::default());
-    let error = client.run_attempt(
-        &worker_test_request(), id, id, &CancellationToken::new(), &progress,
-    ).await.unwrap_err();
+    let error = client
+        .run_attempt(
+            &worker_test_request(),
+            id,
+            id,
+            &CancellationToken::new(),
+            &progress,
+        )
+        .await
+        .unwrap_err();
     assert_eq!(error.code, ErrorCode::AccessRestricted);
     assert!(!error.message.contains("secret"));
     assert_eq!(worker.requests.lock().unwrap().len(), 3);

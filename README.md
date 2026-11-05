@@ -48,7 +48,9 @@ Select **Review source** to open the YouTube confirmation preview. Extraction
 starts only when you choose **Start export**. MP4 is the default; WebM, original
 video, MP3, M4A, and original audio use the existing API options. Video resolution
 settings are ceilings; available sources determine the result. Audio also allows
-an optional bitrate from 32 to 320 kbps.
+an optional bitrate from 32 to 320 kbps. The current extraction adapter uses MP4
+and M4A for its original/default video and audio choices; Frame labels those
+defaults explicitly. Audio source quality is best available.
 
 Frame follows the accepted job, displays honest progress, and offers a preview
 and file download after completion. Cancel queued or running work directly. If a

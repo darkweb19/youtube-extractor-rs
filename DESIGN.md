@@ -15,11 +15,11 @@ colors:
   dark-muted: "#a3a6b2"
 typography:
   display:
-    fontFamily: '"Avenir Next", system-ui, -apple-system, "Segoe UI", sans-serif'
+    fontFamily: '"Avenir Next", Avenir, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
   body:
-    fontFamily: 'system-ui, -apple-system, "Segoe UI", sans-serif'
+    fontFamily: '"Avenir Next", Avenir, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
   mono:
-    fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace'
+    fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", monospace'
 rounded:
   sm: "8px"
   md: "12px"
@@ -29,11 +29,26 @@ spacing:
   page-max: "1120px"
 components:
   button:
-    description: Solid primary, outlined secondary, and quiet utility actions.
+    backgroundColor: "{colors.primary}"
+    textColor: "{colors.surface}"
+    typography: "{typography.body}"
+    rounded: "{rounded.sm}"
   field:
-    description: Labeled native inputs and selects with persistent inline validation.
-  dialog:
-    description: Native modal source confirmation with a reserved 16:9 preview.
+    backgroundColor: "{colors.surface}"
+    textColor: "{colors.text}"
+    rounded: "{rounded.sm}"
+  canvas:
+    backgroundColor: "{colors.background}"
+    textColor: "{colors.muted}"
+  dark-button:
+    backgroundColor: "{colors.dark-primary}"
+    textColor: "{colors.dark-background}"
+  dark-field:
+    backgroundColor: "{colors.dark-surface}"
+    textColor: "{colors.dark-text}"
+  dark-canvas:
+    backgroundColor: "{colors.dark-background}"
+    textColor: "{colors.dark-muted}"
 ---
 
 # Frame design system
@@ -52,9 +67,19 @@ Neutral zinc surfaces carry hierarchy. Periwinkle is reserved for primary action
 
 Canonical runtime values live in `web/app.css`; this file mirrors their accepted meaning (ownership model B). CSS custom properties feed every shared control and state. No independent theme package or generated adapter exists. When tokens change, reconcile these frontmatter values and inspect rendered contrast in both themes in the same branch.
 
+| Document color | Runtime property | Consumers |
+| --- | --- | --- |
+| primary / dark-primary | --primary | Primary buttons, links, focus, current step |
+| background / dark-background | --canvas | Page and scrollbar track |
+| surface / dark-surface | --surface | Panels, inputs, dialog, toasts |
+| text / dark-text | --ink | Headings and form labels |
+| muted / dark-muted | --ink-quiet | Supporting copy and control utilities |
+
+`--ink-faint` uses #6d707c in light mode and #9699a6 in dark mode for compact labels; both pass 4.5:1 against their canvas. Radius frontmatter maps directly to `--radius-sm/md/lg`; typography maps to `--font-sans` and `--font-mono`; page-max maps to the shared 1120px shell/header width. No framework adapter is involved.
+
 ## Typography
 
-Use the locally available Avenir Next/system display stack sparingly for the page heading and brand. System UI text keeps forms familiar and avoids network font shifts. Monospace is reserved for workflow indices, job identifiers, and compact file details. Body copy uses sentence case, approximately 1.5 line height, and short measures. Inputs remain legible on mobile. All families have system fallbacks; no remote font requests are required.
+Use the locally available Avenir Next/system stack, with display sizing reserved for the page heading and brand. The same family keeps forms familiar and avoids network font shifts. Monospace is reserved for workflow indices, job identifiers, and compact file details. Body copy uses sentence case, approximately 1.5 line height, and short measures. Inputs remain legible on mobile. All families have system fallbacks; no remote font requests are required.
 
 ## Layout
 

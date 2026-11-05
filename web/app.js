@@ -251,7 +251,7 @@
       if (!result.ok) {
         let payload = null;
         try { payload = await result.json(); } catch { /* non-JSON proxy response */ }
-        if (result.status === 401) throw appError("The API token was rejected. Check Private API access and retry.", { error_kind: "http", error_code: "UNAUTHORIZED", http_status: result.status });
+        if (result.status === 401) throw appError("The API token was rejected. Check your API access token and retry.", { error_kind: "http", error_code: "UNAUTHORIZED", http_status: result.status });
         throw backendError(payload?.error, "The service returned HTTP " + result.status + ".", "http", result.status);
       }
       const value = options.file ? await result.blob() : result.status === 204 ? null : await result.json();
@@ -261,13 +261,13 @@
       let error = caught;
       if (caught?.name === "AbortError")
         error = options.signal?.aborted ? appError("Request cancelled.", { error_kind: "abort", error_code: "CANCELLED" })
-          : appError("The service did not respond in time. Check Railway and retry.", { error_kind: "timeout", error_code: "TIMEOUT" });
+          : appError("The service did not respond in time. Check the service and retry.", { error_kind: "timeout", error_code: "TIMEOUT" });
       else if (caught instanceof TypeError)
-        error = appError("The extractor is unreachable. Check the network and Railway deployment.", { error_kind: "network", error_code: "NETWORK" });
+        error = appError("The extractor is unreachable. Check the network and service, then retry.", { error_kind: "network", error_code: "NETWORK" });
       else if (caught instanceof SyntaxError)
-        error = appError("The service returned an invalid response. Check Railway logs and retry.", { error_kind: "protocol" });
+        error = appError("The service returned an invalid response. Check the service and retry.", { error_kind: "protocol" });
       else if (!caught?.diagnostic)
-        error = appError("The service returned an unexpected response. Check Railway logs and retry.", { error_kind: "protocol" });
+        error = appError("The service returned an unexpected response. Check the service and retry.", { error_kind: "protocol" });
       diagnostic(error.diagnostic.error_kind === "abort" ? "info" : "error", error.diagnostic.error_kind === "abort" ? "request.aborted" : "request.failed", { ...details, ...error.diagnostic, elapsed_ms: elapsed() }, captured);
       throw error;
     } finally {
@@ -343,7 +343,7 @@
         job.status === "queued" ? "The extractor will begin when a worker is available." : "Your file is being downloaded and prepared. Keep this tab open.",
         true, Number.isFinite(job.progress?.percent) ? job.progress.percent : null);
     }
-    throw appError("The job is taking longer than expected. Check Railway before creating another.", { error_kind: "timeout", error_code: "TIMEOUT" });
+    throw appError("The job is taking longer than expected. Check this job before creating another.", { error_kind: "timeout", error_code: "TIMEOUT" });
   }
   async function generate() {
     if (state.busy || state.jobOutstanding || !requireToken()) return;

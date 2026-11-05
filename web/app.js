@@ -85,7 +85,10 @@
     for (const secret of [ui.token.value])
       if (secret) message = message.split(secret).join("[redacted]");
     return message.replace(/(?:https?:\/\/|blob:)\S+/gi, "[redacted URL]")
-      .replace(/Bearer\s+\S+/gi, "Bearer [redacted]").slice(0, 800);
+      .replace(/Bearer\s+\S+/gi, "Bearer [redacted]")
+      // A token is 32–4096 contiguous visible ASCII characters; do not retain
+      // its value after saving just to redact a later backend error.
+      .replace(/[!-~]{32,}/g, "[redacted]").slice(0, 800);
   }
   function appError(message, details = {}) {
     const error = Error(message); error.diagnostic = details; return error;

@@ -1,5 +1,6 @@
-//! One trusted service tenant. Every v1 route, including file delivery, requires the shared bearer token.
+//! One trusted service tenant, authenticated by bearer token or browser session.
 use crate::{
+    browser_auth,
     config::Config,
     error::{AppError, ErrorCode, Result},
     extractor::Extractor,
@@ -9,11 +10,11 @@ use crate::{
 use axum::{
     body::Body,
     extract::{rejection::JsonRejection, DefaultBodyLimit, Path, Request, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -56,6 +57,12 @@ impl ApiState {
 }
 pub fn router(state: ApiState) -> Router {
     let protected = Router::new()
+        .route(
+            "/api/v1/session",
+            get(session_status)
+                .post(session_login)
+                .delete(session_logout),
+        )
         .route("/api/v1/videos/info", post(video_info))
         .route("/api/v1/downloads", post(create_download))
         .route("/api/v1/internal/activity", get(worker_activity))
@@ -75,7 +82,7 @@ pub fn router(state: ApiState) -> Router {
         .with_state(state)
 }
 // The operator UI is served without a JavaScript build tool, and does not
-// embed or expose the server's API_TOKEN. All v1 API calls remain bearer-protected.
+// embed or expose the server's API_TOKEN.
 async fn frontend_page() -> impl IntoResponse {
     (
         [
@@ -108,23 +115,80 @@ async fn frontend_js() -> impl IntoResponse {
         include_str!("../web/app.js"),
     )
 }
-async fn protect(State(state): State<ApiState>, request: Request, next: Next) -> Response {
-    if let Some(expected) = &state.config.api_token {
-        let provided = request
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "))
-            .unwrap_or("");
-        if !bool::from(expected.as_bytes().ct_eq(provided.as_bytes())) {
-            return AppError::new(ErrorCode::Unauthorized, "A valid bearer token is required")
-                .into_response();
-        }
+#[derive(Clone, Copy)]
+enum Authentication {
+    Bearer,
+    Cookie,
+    UnauthenticatedDevelopment,
+}
+
+fn valid_bearer(headers: &HeaderMap, expected: &str) -> bool {
+    let mut values = headers.get_all(header::AUTHORIZATION).iter();
+    let provided = values
+        .next()
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    values.next().is_none() && bool::from(expected.as_bytes().ct_eq(provided.as_bytes()))
+}
+
+fn secure_response(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
+}
+
+async fn protect(State(state): State<ApiState>, mut request: Request, next: Next) -> Response {
+    let session = request.uri().path() == "/api/v1/session";
+    let session_write = session && matches!(*request.method(), Method::POST | Method::DELETE);
+    if session_write && !browser_auth::browser_request(request.headers()) {
+        return secure_response(
+            AppError::new(
+                ErrorCode::Unauthorized,
+                "A valid browser request is required",
+            )
+            .into_response(),
+        );
     }
+    if session && request.method() == Method::DELETE {
+        // Clearing a cookie is deliberately unauthenticated and inexpensive. It
+        // must not consume the shared authenticated request budget.
+        return secure_response(next.run(request).await);
+    }
+    let authentication = match &state.config.api_token {
+        None => Some(Authentication::UnauthenticatedDevelopment),
+        Some(expected) if request.headers().contains_key(header::AUTHORIZATION) => {
+            valid_bearer(request.headers(), expected).then_some(Authentication::Bearer)
+        }
+        Some(_) if session && request.method() == Method::POST => None,
+        Some(expected)
+            if browser_auth::browser_request(request.headers())
+                && browser_auth::valid_cookie(request.headers(), expected) =>
+        {
+            Some(Authentication::Cookie)
+        }
+        Some(_) => None,
+    };
+    let Some(authentication) = authentication else {
+        return secure_response(
+            AppError::new(ErrorCode::Unauthorized, "A valid bearer token is required")
+                .into_response(),
+        );
+    };
+    request.extensions_mut().insert(authentication);
     {
         let mut rate = match state.rate.lock() {
             Ok(rate) => rate,
-            Err(_) => return AppError::internal("Rate limiter unavailable").into_response(),
+            Err(_) => {
+                return secure_response(
+                    AppError::internal("Rate limiter unavailable").into_response(),
+                )
+            }
         };
         if rate.started.elapsed() >= Duration::from_secs(60) {
             rate.started = Instant::now();
@@ -137,13 +201,14 @@ async fn protect(State(state): State<ApiState>, request: Request, next: Next) ->
             response
                 .headers_mut()
                 .insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
-            return response;
+            return secure_response(response);
         }
         rate.used += 1;
     }
     let Ok(permit) = state.gate.clone().try_acquire_owned() else {
-        return AppError::new(ErrorCode::QueueFull, "Concurrent request limit reached")
-            .into_response();
+        return secure_response(
+            AppError::new(ErrorCode::QueueFull, "Concurrent request limit reached").into_response(),
+        );
     };
     match tokio::time::timeout(state.config.request_timeout, next.run(request)).await {
         Ok(mut response) => {
@@ -172,17 +237,39 @@ async fn protect(State(state): State<ApiState>, request: Request, next: Next) ->
                 receiver,
                 |mut receiver| async move { receiver.recv().await.map(|chunk| (chunk, receiver)) },
             ));
-            response
-                .headers_mut()
-                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-            response.headers_mut().insert(
-                header::X_CONTENT_TYPE_OPTIONS,
-                HeaderValue::from_static("nosniff"),
-            );
-            response
+            secure_response(response)
         }
-        Err(_) => AppError::new(ErrorCode::Timeout, "API request timed out").into_response(),
+        Err(_) => secure_response(
+            AppError::new(ErrorCode::Timeout, "API request timed out").into_response(),
+        ),
     }
+}
+
+async fn session_status(
+    Extension(authentication): Extension<Authentication>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "authenticated": true,
+        "saved": matches!(authentication, Authentication::Cookie)
+    }))
+}
+
+async fn session_login(State(state): State<ApiState>) -> Result<Response> {
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    if let Some(token) = &state.config.api_token {
+        let cookie = browser_auth::new_cookie(token)
+            .ok_or_else(|| AppError::internal("Browser session could not be created"))?;
+        response.headers_mut().insert(header::SET_COOKIE, cookie);
+    }
+    Ok(response)
+}
+
+async fn session_logout() -> Response {
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, browser_auth::clear_cookie());
+    response
 }
 async fn health(State(state): State<ApiState>) -> Response {
     let Ok(mut cached) = state.readiness.try_lock() else {

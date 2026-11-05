@@ -321,6 +321,8 @@
       const job = await request("/api/v1/downloads/" + state.jobId, { signal });
       if (run !== state.run) return;
       if (!job || !jobStatuses.has(job.status)) throw appError("Unexpected job status from the backend.", { error_kind: "protocol" });
+      if (job.job_id !== undefined && job.job_id !== state.jobId)
+        throw appError("The backend returned a different job ID. Check the job before continuing.", { error_kind: "protocol" });
       if (job.status !== lastStatus) {
         lastStatus = job.status;
         diagnostic(job.status === "failed" ? "error" : "info", "job.state", { job_status: job.status });
@@ -385,6 +387,7 @@
   }
   async function cancel() {
     if (!state.jobOutstanding || !uuid(state.jobId) || (state.busy && state.phase === "cancelling")) return;
+    if (!state.busy && !requireToken()) return;
     const id = state.jobId; state.run += 1; step("cancelling");
     const captured = context(); diagnostic("info", "cancel.requested", {}, captured);
     state.controller?.abort(); state.controller = null;

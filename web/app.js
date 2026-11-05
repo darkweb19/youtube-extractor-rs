@@ -135,8 +135,8 @@
     if (message) field.setAttribute("aria-invalid", "true"); else field.removeAttribute("aria-invalid");
   }
   const formats = {
-    video: [["mp4", "MP4"], ["original", "Original"], ["webm", "WebM"]],
-    audio: [["original", "Original"], ["m4a", "M4A"], ["mp3", "MP3"]]
+    video: [["mp4", "MP4"], ["original", "Default (MP4)"], ["webm", "WebM"]],
+    audio: [["original", "Default (M4A)"], ["m4a", "M4A"], ["mp3", "MP3"]]
   };
   const qualities = [["best", "Best available"], ["worst", "Lowest available"], ...[144, 240, 360, 480, 720, 1080, 1440, 2160, 4320, 8640].map((height) => [height + "p", "Up to " + height + "p"])];
   function setOptions(select, options, value) {
@@ -147,14 +147,15 @@
   function updateMedia() {
     const kind = ui.media.value === "audio" ? "audio" : "video";
     setOptions(ui.format, formats[kind], kind === "video" ? "mp4" : "original");
-    setOptions(ui.quality, kind === "video" ? qualities : qualities.slice(0, 2), "best");
+    // The current audio adapter always selects the best source, regardless of quality.
+    setOptions(ui.quality, kind === "video" ? qualities : qualities.slice(0, 1), "best");
     ui.bitrateField.hidden = kind !== "audio";
     fieldError(ui.bitrate, ui.bitrateError);
   }
   function configuration() {
     const kind = ui.media.value === "audio" ? "audio" : "video";
     const format = formats[kind].some(([key]) => key === ui.format.value) ? ui.format.value : formats[kind][0][0];
-    const allowedQualities = kind === "video" ? qualities : qualities.slice(0, 2);
+    const allowedQualities = kind === "video" ? qualities : qualities.slice(0, 1);
     const quality = allowedQualities.some(([key]) => key === ui.quality.value) ? ui.quality.value : "best";
     const bitrate = ui.bitrate.value.trim();
     if (kind === "audio" && bitrate && (!/^\d+$/.test(bitrate) || Number(bitrate) < 32 || Number(bitrate) > 320)) {
@@ -166,7 +167,8 @@
   }
   function describeConfiguration(config) {
     const quality = qualities.find(([key]) => key === config.quality)?.[1] || "Best available";
-    return [config.type === "audio" ? "Audio" : "Video", config.format.toUpperCase(), quality,
+    const format = formats[config.type].find(([key]) => key === config.format)?.[1] || config.format.toUpperCase();
+    return [config.type === "audio" ? "Audio" : "Video", format, quality,
       config.audio_bitrate_kbps ? config.audio_bitrate_kbps + " kbps" : ""].filter(Boolean).join(" · ");
   }
   function discardPreview() {

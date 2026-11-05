@@ -29,9 +29,12 @@
     progressNumber: $("progress-number"), cancel: $("cancel-button"),
     video: $("result-video"), filename: $("file-name"), filesize: $("file-size"),
     download: $("download-link"), errorText: $("error-description"),
-    toasts: $("toast-region")
+    toasts: $("toast-region"), media: $("media-type"), format: $("output-format"),
+    quality: $("output-quality"), bitrate: $("audio-bitrate"), bitrateField: $("bitrate-field"),
+    urlError: $("url-error"), tokenError: $("token-error"), bitrateError: $("bitrate-error"),
+    selection: $("confirm-selection")
   };
-  const state = { token: "", url: "", jobId: null, controller: null, objectUrl: null, run: 0, busy: false, phase: "idle", view: null };
+  const state = { token: "", url: "", configuration: null, jobId: null, controller: null, objectUrl: null, run: 0, busy: false, phase: "idle", view: null };
   const jobStatuses = new Set(["queued", "running", "completed", "failed", "cancelled"]);
   const progressStages = new Set(["extracting", "downloading", "processing", "completed"]);
   const errorCodes = new Set(["INVALID_REQUEST", "UNAUTHORIZED", "NOT_FOUND", "QUEUE_FULL", "RATE_LIMITED", "CANCELLED", "NETWORK", "DNS", "ACCESS_RESTRICTED", "UPSTREAM_RATE_LIMITED", "PLAYER_CHANGED", "UNSUPPORTED_FORMAT", "EXPIRED_URL", "DOWNLOAD_INTERRUPTED", "DOWNLOAD_TOO_LARGE", "FFMPEG_FAILED", "STORAGE", "TIMEOUT", "INTERNAL"]);
@@ -100,19 +103,63 @@
   }
   function validateLink(value) {
     let url;
-    try { url = new URL(value.trim()); } catch { throw Error("Enter a valid YouTube video link."); }
-    if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.port)
+    const input = value.trim();
+    try { url = new URL(input); } catch { throw Error("Enter a valid YouTube video link."); }
+    if (!["https:", "http:"].includes(url.protocol) || url.username || url.password || url.port || /[\\\x00-\x1f\x7f]/.test(input))
+      throw Error("Enter a standard YouTube video link without credentials or a custom port.");
+    const rawPath = input.split("://")[1]?.replace(/^[^/?#]*/, "").split(/[?#]/)[0] || "";
+    if (rawPath.includes("%") || rawPath.split("/").some((part) => part === "." || part === ".."))
       throw Error("Enter a standard YouTube video link.");
     const host = url.hostname.toLowerCase();
+    const ids = url.searchParams.getAll("v");
     let id = "";
-    if (["youtu.be", "www.youtu.be"].includes(host)) id = url.pathname.split("/")[1] || "";
-    else if (["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtube-nocookie.com", "www.youtube-nocookie.com"].includes(host)) {
-      const parts = url.pathname.split("/").filter(Boolean);
-      if (url.pathname === "/watch") id = url.searchParams.get("v") || "";
-      else if (["shorts", "live", "embed", "v"].includes(parts[0]) && parts.length === 2) id = parts[1];
-    } else throw Error("Only YouTube URLs are supported.");
-    if (!/^[A-Za-z0-9_-]{11}$/.test(id)) throw Error("The link does not contain a valid 11-character video ID.");
+    if (host === "youtu.be" && !ids.length) id = url.pathname.slice(1);
+    else if (["youtube.com", "www.youtube.com", "m.youtube.com"].includes(host)) {
+      if (url.pathname === "/watch" && ids.length === 1) id = ids[0];
+      else if (!ids.length && /^\/(shorts|live)\//.test(url.pathname)) id = url.pathname.split("/")[2] || "";
+      if (url.pathname !== "/watch" && url.pathname.split("/").length !== 3) id = "";
+    }
+    if (!/^[A-Za-z0-9_-]{11}$/.test(id)) throw Error("Enter a YouTube watch, Shorts, live, or youtu.be link with a valid video ID.");
     return { canonical: "https://www.youtube.com/watch?v=" + id, embed: "https://www.youtube-nocookie.com/embed/" + id + "?rel=0" };
+  }
+  function fieldError(field, target, message = "") {
+    target.textContent = message; target.hidden = !message;
+    if (message) field.setAttribute("aria-invalid", "true"); else field.removeAttribute("aria-invalid");
+  }
+  const formats = {
+    video: [["mp4", "MP4"], ["original", "Original"], ["webm", "WebM"]],
+    audio: [["original", "Original"], ["m4a", "M4A"], ["mp3", "MP3"]]
+  };
+  const qualities = [["best", "Best available"], ["worst", "Lowest available"], ...[144, 240, 360, 480, 720, 1080, 1440, 2160, 4320, 8640].map((height) => [height + "p", "Up to " + height + "p"])];
+  function setOptions(select, options, value) {
+    // The option lists are fixed product values, never user or server input.
+    select.innerHTML = options.map(([key, label]) => `<option value="${key}">${label}</option>`).join("");
+    select.value = options.some(([key]) => key === value) ? value : options[0][0];
+  }
+  function updateMedia() {
+    const kind = ui.media.value === "audio" ? "audio" : "video";
+    setOptions(ui.format, formats[kind], kind === "video" ? "mp4" : "original");
+    setOptions(ui.quality, kind === "video" ? qualities : qualities.slice(0, 2), "best");
+    ui.bitrateField.hidden = kind !== "audio";
+    fieldError(ui.bitrate, ui.bitrateError);
+  }
+  function configuration() {
+    const kind = ui.media.value === "audio" ? "audio" : "video";
+    const format = formats[kind].some(([key]) => key === ui.format.value) ? ui.format.value : formats[kind][0][0];
+    const allowedQualities = kind === "video" ? qualities : qualities.slice(0, 2);
+    const quality = allowedQualities.some(([key]) => key === ui.quality.value) ? ui.quality.value : "best";
+    const bitrate = ui.bitrate.value.trim();
+    if (kind === "audio" && bitrate && (!/^\d+$/.test(bitrate) || Number(bitrate) < 32 || Number(bitrate) > 320)) {
+      fieldError(ui.bitrate, ui.bitrateError, "Enter a whole number from 32 to 320 kbps, or leave this blank.");
+      ui.bitrate.focus(); return null;
+    }
+    fieldError(ui.bitrate, ui.bitrateError);
+    return { type: kind, format, quality, ...(kind === "audio" && bitrate ? { audio_bitrate_kbps: Number(bitrate) } : {}) };
+  }
+  function describeConfiguration(config) {
+    const quality = qualities.find(([key]) => key === config.quality)?.[1] || "Best available";
+    return [config.type === "audio" ? "Audio" : "Video", config.format.toUpperCase(), quality,
+      config.audio_bitrate_kbps ? config.audio_bitrate_kbps + " kbps" : ""].filter(Boolean).join(" · ");
   }
   function discardPreview() {
     ui.video.pause(); ui.video.removeAttribute("src"); ui.video.load();
@@ -150,9 +197,10 @@
     if (value.length < 32 || value.length > 4096 || !/^[!-~]+$/.test(value)) {
       ui.dialog.close(); ui.access.open = true; ui.token.focus();
       diagnostic("warn", "access.validation_failed", { error_kind: "validation" }, preparationContext());
-      toast("Enter your private API token (at least 32 characters) to generate a video.");
+      fieldError(ui.token, ui.tokenError, "Enter a token of 32–4096 visible characters, with no spaces.");
       return false;
     }
+    fieldError(ui.token, ui.tokenError);
     state.token = value; diagnostic("info", "access.ready", {}, preparationContext()); return true;
   }
   async function request(path, options = {}) {
@@ -277,7 +325,7 @@
     working("Starting your download", "Sending your confirmed video to the extractor.");
     try {
       const job = await request("/api/v1/downloads", {
-        method: "POST", body: { url: state.url, type: "video", format: "mp4", quality: "best" },
+        method: "POST", body: { url: state.url, ...state.configuration },
         signal: controller.signal
       });
       if (run !== state.run) return;
@@ -308,6 +356,12 @@
     diagnostic("info", "workflow.reset");
     state.run += 1; state.jobId = null; discardPreview(); step("idle"); mode("idle"); ui.url.focus();
   }
+  ui.media.addEventListener("change", updateMedia);
+  ui.url.addEventListener("input", () => fieldError(ui.url, ui.urlError));
+  ui.token.addEventListener("input", () => fieldError(ui.token, ui.tokenError));
+  ui.bitrate.addEventListener("input", () => fieldError(ui.bitrate, ui.bitrateError));
+  if (!ui.media.value) ui.media.value = "video";
+  updateMedia();
   $("token-toggle").addEventListener("click", () => {
     const visible = ui.token.type === "password";
     ui.token.type = visible ? "text" : "password";
@@ -320,8 +374,11 @@
     diagnostic("info", "source.validation_started", {}, preparationContext());
     let value;
     try { value = validateLink(ui.url.value); }
-    catch (error) { diagnostic("warn", "source.validation_failed", { error_kind: "validation" }, preparationContext()); ui.url.focus(); toast(error.message); return; }
+    catch (error) { diagnostic("warn", "source.validation_failed", { error_kind: "validation" }, preparationContext()); fieldError(ui.url, ui.urlError, error.message); ui.url.focus(); return; }
+    fieldError(ui.url, ui.urlError);
+    const config = configuration(); if (!config) return;
     diagnostic("info", "source.validated", {}, preparationContext()); step("confirmation", preparationContext());
+    state.configuration = config; ui.selection.textContent = describeConfiguration(config);
     state.url = value.canonical; ui.iframe.src = value.embed; ui.external.href = value.canonical;
     ui.dialog.showModal(); ui.confirm.focus(); diagnostic("info", "confirmation.opened", {}, preparationContext());
   });

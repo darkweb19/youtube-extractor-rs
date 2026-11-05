@@ -27,7 +27,8 @@
     workTitle: $("work-heading"), workText: $("work-description"),
     progressArea: $("progress-area"), progress: $("job-progress"),
     progressNumber: $("progress-number"), cancel: $("cancel-button"),
-    video: $("result-video"), filename: $("file-name"), filesize: $("file-size"),
+    video: $("result-video"), audio: $("result-audio"), filename: $("file-name"), filesize: $("file-size"),
+    extension: $("file-extension"), successTitle: $("success-title"), errorTitle: $("error-title"),
     download: $("download-link"), errorText: $("error-description"),
     toasts: $("toast-region"), media: $("media-type"), format: $("output-format"),
     quality: $("output-quality"), bitrate: $("audio-bitrate"), bitrateField: $("bitrate-field"),
@@ -169,10 +170,17 @@
       config.audio_bitrate_kbps ? config.audio_bitrate_kbps + " kbps" : ""].filter(Boolean).join(" · ");
   }
   function discardPreview() {
-    ui.video.pause(); ui.video.removeAttribute("src"); ui.video.load();
+    for (const player of [ui.video, ui.audio]) { player.pause(); player.removeAttribute("src"); player.load(); }
     ui.download.removeAttribute("href");
     if (state.objectUrl) URL.revokeObjectURL(state.objectUrl);
     state.objectUrl = null;
+  }
+  function revealResult(target) {
+    if (window.matchMedia?.("(max-width: 760px)").matches && typeof target.scrollIntoView === "function") {
+      const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      target.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "center" });
+    }
+    target.focus({ preventScroll: true });
   }
   function mode(next) {
     if (state.view !== next) { state.view = next; diagnostic("info", "ui.state", { view: next }); }
@@ -204,7 +212,7 @@
     mode("error"); ui.errorText.textContent = message + " " + extra;
     const recoverable = Boolean(uuid(state.jobId) && state.jobOutstanding);
     ui.retry.hidden = recoverable; ui.checkJob.hidden = !recoverable; ui.cancelRecovery.hidden = !recoverable;
-    toast(message);
+    toast(message); revealResult(ui.errorTitle);
   }
   function requireToken() {
     const value = ui.token.value;
@@ -281,22 +289,26 @@
       url !== "/api/v1/downloads/" + state.jobId + "/file")
       throw appError("The backend returned an unexpected download URL.", { error_kind: "protocol" });
     step("file_transfer"); diagnostic("info", "file.transfer_started");
-    working("Preparing your preview", "Loading the MP4 for playback and download.");
+    working("Preparing your preview", "Loading your file for playback and download.");
     // The file is bearer-protected; <video src> cannot attach an Authorization header.
     // Fetch once and share the transient blob URL with the player and download link.
     const blob = await request(url, { signal, file: true });
     if (run !== state.run) return;
-    if (!blob.size) throw appError("The backend returned an empty video file.", { error_kind: "protocol" });
+    if (!blob.size) throw appError("The backend returned an empty file.", { error_kind: "protocol" });
     diagnostic("info", "file.transfer_completed", { bytes: blob.size });
     discardPreview(); state.objectUrl = URL.createObjectURL(blob);
-    ui.video.src = state.objectUrl;
-    const safeName = (job.output?.filename || "video.mp4").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100);
+    const isAudio = job.output?.mime_type?.startsWith("audio/") || state.configuration?.type === "audio";
+    ui.video.hidden = isAudio; ui.audio.hidden = !isAudio;
+    (isAudio ? ui.audio : ui.video).src = state.objectUrl;
+    const fallback = "frame-export" + (state.configuration?.format && state.configuration.format !== "original" ? "." + state.configuration.format : "");
+    const safeName = (job.output?.filename || fallback).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100) || fallback;
+    const extension = safeName.includes(".") ? safeName.split(".").pop() : "file";
     ui.filename.textContent = safeName;
-    ui.filesize.textContent = fileSize(blob.size) + " · MP4 video";
-    ui.download.href = state.objectUrl;
-    ui.download.download = safeName.endsWith(".mp4") ? safeName : "video.mp4";
+    ui.filesize.textContent = fileSize(blob.size) + " · " + (isAudio ? "Audio" : "Video") + " file";
+    ui.extension.textContent = /^[A-Za-z0-9]{1,8}$/.test(extension) ? extension.toUpperCase() : "FILE";
+    ui.download.href = state.objectUrl; ui.download.download = safeName;
     state.jobOutstanding = false; step("ready"); mode("success"); diagnostic("info", "preview.ready", { bytes: blob.size });
-    toast("Your MP4 was generated successfully and is ready to download.", true);
+    toast("Your file is ready to download.", true); revealResult(ui.successTitle);
   }
   async function poll(signal, run, immediate = false) {
     const deadline = Date.now() + 35 * 60 * 1000;
@@ -325,8 +337,8 @@
       if (progressStages.has(progress) && progress !== lastProgress) {
         lastProgress = progress; diagnostic("info", "job.progress_stage", { progress_stage: progress });
       }
-      working(job.status === "queued" ? "Waiting in the queue" : "Generating your MP4",
-        job.status === "queued" ? "The extractor will begin when a worker is available." : "Your video is being downloaded and prepared. Keep this tab open.",
+      working(job.status === "queued" ? "Waiting in the queue" : "Preparing your file",
+        job.status === "queued" ? "The extractor will begin when a worker is available." : "Your file is being downloaded and prepared. Keep this tab open.",
         true, Number.isFinite(job.progress?.percent) ? job.progress.percent : null);
     }
     throw appError("The job is taking longer than expected. Check Railway before creating another.", { error_kind: "timeout", error_code: "TIMEOUT" });
@@ -341,7 +353,7 @@
     const submissionId = typeof window.crypto?.randomUUID === "function" ? uuid(window.crypto.randomUUID()) : null;
     const controller = new AbortController(); state.controller = controller;
     step("submitting"); diagnostic("info", "job.submission_started");
-    working("Starting your download", "Sending your confirmed video to the extractor.");
+    working("Starting your export", "Sending your confirmed video to the extractor."); revealResult(ui.workTitle);
     try {
       const job = await request("/api/v1/downloads", {
         method: "POST", body: { url: state.url, ...state.configuration },
@@ -366,7 +378,7 @@
     if (state.busy || !state.jobOutstanding || !uuid(state.jobId) || !requireToken()) return;
     state.run += 1; const run = state.run;
     const controller = new AbortController(); state.controller = controller;
-    step("checking"); working("Checking your export", "Looking up the latest job status.", true);
+    step("checking"); working("Checking your export", "Looking up the latest job status.", true); revealResult(ui.workTitle);
     try { await poll(controller.signal, run, true); }
     catch (error) { if (run === state.run && !controller.signal.aborted) failure(error); }
     finally { if (run === state.run) state.controller = null; }
@@ -415,7 +427,7 @@
     diagnostic("info", "source.validated", {}, preparationContext()); step("confirmation", preparationContext());
     state.configuration = config; ui.selection.textContent = describeConfiguration(config);
     state.url = value.canonical; ui.iframe.src = value.embed; ui.external.href = value.canonical;
-    ui.dialog.showModal(); ui.confirm.focus(); diagnostic("info", "confirmation.opened", {}, preparationContext());
+    ui.dialog.showModal(); $("back-button").focus(); diagnostic("info", "confirmation.opened", {}, preparationContext());
   });
   $("close-dialog").addEventListener("click", () => ui.dialog.close());
   $("back-button").addEventListener("click", () => ui.dialog.close());
@@ -429,14 +441,16 @@
   ui.cancelRecovery.addEventListener("click", cancel);
   $("new-video-button").addEventListener("click", reset);
   $("retry-button").addEventListener("click", reset);
-  ui.video.addEventListener("error", () => {
-    if (state.objectUrl) {
-      diagnostic("warn", "preview.playback_failed", { error_kind: "playback", playback_code: ui.video.error?.code });
-      toast("The MP4 is ready, but this browser may not support the codec. Use Download MP4.");
-    }
-  });
-  ui.video.addEventListener("loadedmetadata", () => { if (state.objectUrl) diagnostic("info", "preview.metadata_loaded"); });
-  ui.video.addEventListener("playing", () => { if (state.objectUrl) diagnostic("info", "preview.playing"); });
+  for (const player of [ui.video, ui.audio]) {
+    player.addEventListener("error", () => {
+      if (state.objectUrl && !player.hidden) {
+        diagnostic("warn", "preview.playback_failed", { error_kind: "playback", playback_code: player.error?.code });
+        toast("The file is ready, but this browser may not support the format. Use Download file.");
+      }
+    });
+    player.addEventListener("loadedmetadata", () => { if (state.objectUrl && !player.hidden) diagnostic("info", "preview.metadata_loaded"); });
+    player.addEventListener("playing", () => { if (state.objectUrl && !player.hidden) diagnostic("info", "preview.playing"); });
+  }
   ui.download.addEventListener("click", () => { if (state.objectUrl) diagnostic("info", "file.download_clicked"); });
   window.addEventListener("pagehide", () => { if (state.objectUrl) URL.revokeObjectURL(state.objectUrl); });
   mode("idle"); diagnostic("info", "app.ready");

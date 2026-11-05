@@ -22,6 +22,7 @@
   --font-sans: "Avenir Next", Avenir, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   scrollbar-color: var(--border-strong) var(--canvas);
+  scrollbar-width: thin;
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
@@ -68,7 +69,7 @@ svg { display: block; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: var(--canvas); }
 ::-webkit-scrollbar-thumb { background: var(--border-strong); border: 2px solid var(--canvas); border-radius: 10px; }
-::-webkit-scrollbar-thumb:hover { background: var(--ink-faint); }
+::-webkit-scrollbar-thumb:hover, ::-webkit-scrollbar-thumb:active { background: var(--ink-faint); }
 .topbar { height: 68px; border-bottom: 1px solid var(--border); background: var(--surface); }
 .topbar-inner { max-width: 1120px; height: 100%; margin: 0 auto; display: flex; align-items: center; padding: 0 4px; }
 .brand { display: inline-flex; gap: 10px; align-items: center; color: var(--ink); font-size: 19px; font-weight: 700; letter-spacing: -.055em; text-decoration: none; }
@@ -166,6 +167,8 @@ progress::-webkit-progress-bar { background: var(--border); } progress::-webkit-
 .success-heading h3 { margin: 0; }
 .success-check { display: grid; place-items: center; width: 27px; height: 27px; border: 1px solid var(--success); border-radius: 8px; color: var(--success); font-size: 15px; }
 .result-video { display: block; width: 100%; max-height: 230px; aspect-ratio: 16/9; border-radius: var(--radius-sm); background: #0c0d10; }
+.result-audio { display: block; width: 100%; height: 54px; }
+#work-heading, #success-title, #error-title { scroll-margin-block: 24px; }
 .file-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 16px 0; }
 .file-row strong, .file-row span { display: block; }
 .file-row strong { max-width: 250px; overflow-wrap: anywhere; font-size: 12px; }

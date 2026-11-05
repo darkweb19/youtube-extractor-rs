@@ -76,26 +76,27 @@
         </section>
 
         <section class="panel result-panel" aria-labelledby="result-title">
-          <div class="result-heading"><div><p class="eyebrow">03 / EXPORT</p><h2 id="result-title">Your output</h2></div><span id="stage-pill" class="stage-pill" data-stage="idle">WAITING</span></div>
+          <div class="result-heading"><div><p class="eyebrow">03 / EXPORT</p><h2 id="result-title">Your output</h2></div><span id="stage-pill" class="stage-pill" role="status" aria-live="polite" data-stage="idle">WAITING</span></div>
           <p id="job-id" class="job-id" hidden></p>
           <div id="empty-state" class="empty-state">
             <div class="empty-art" aria-hidden="true"><span class="frame-corner top-left"></span><span class="frame-corner top-right"></span><span class="frame-corner bottom-left"></span><span class="frame-corner bottom-right"></span><svg viewBox="0 0 48 48" fill="none"><path d="m19 15 14 9-14 9V15Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg></div>
             <h3>Ready when you are.</h3><p>Your finished file will appear here.</p>
           </div>
           <div id="working-state" class="working-state" hidden>
-            <span class="spinner" aria-hidden="true"></span><h3 id="work-heading">Preparing your video</h3><p id="work-description">Your request is being processed.</p>
-            <div class="progress-area" id="progress-area" hidden><div class="progress-label"><span>Download progress</span><span id="progress-number">0%</span></div><progress id="job-progress" max="100" value="0">0%</progress></div>
+            <span class="spinner" aria-hidden="true"></span><h3 id="work-heading" tabindex="-1">Preparing your video</h3><p id="work-description">Your request is being processed.</p>
+            <div class="progress-area" id="progress-area" hidden><div class="progress-label"><span>Download progress</span><span id="progress-number">0%</span></div><progress id="job-progress" aria-label="Export progress" max="100">0%</progress></div>
             <button type="button" class="subtle-button" id="cancel-button" hidden>Cancel export</button>
           </div>
           <div id="success-state" class="success-state" hidden>
-            <div class="success-heading"><span class="success-check" aria-hidden="true">✓</span><div><p class="eyebrow">EXPORT COMPLETE</p><h3 id="success-title">Your file is ready.</h3></div></div>
+            <div class="success-heading"><span class="success-check" aria-hidden="true">✓</span><div><p class="eyebrow">EXPORT COMPLETE</p><h3 id="success-title" tabindex="-1">Your file is ready.</h3></div></div>
             <video id="result-video" class="result-video" controls playsinline preload="metadata" aria-label="Generated video preview"></video>
+            <audio id="result-audio" class="result-audio" controls preload="metadata" aria-label="Generated audio preview" hidden></audio>
             <div class="file-row"><div><strong id="file-name">video.mp4</strong><span id="file-size">Video file</span></div><span class="file-extension" id="file-extension">MP4</span></div>
-            <a id="download-link" class="download-button" href="#" download="video.mp4"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 17v3h16v-3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><span id="download-label">Download file</span></a>
+            <a id="download-link" class="download-button" download><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 17v3h16v-3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><span id="download-label">Download file</span></a>
             <button type="button" class="new-video" id="new-video-button">Start another export <span aria-hidden="true">↗</span></button>
           </div>
           <div id="error-state" class="error-state" hidden>
-            <span class="error-glyph" aria-hidden="true">!</span><h3>Export needs attention.</h3><p id="error-description">Check the error and try again.</p>
+            <span class="error-glyph" aria-hidden="true">!</span><h3 id="error-title" tabindex="-1">Export needs attention.</h3><p id="error-description">Check the error and try again.</p>
             <div class="error-actions"><button class="secondary-button" type="button" id="retry-button">Try again</button><button class="secondary-button" type="button" id="check-job-button" hidden>Check job</button><button class="subtle-button" type="button" id="cancel-recovery-button" hidden>Cancel job</button></div>
           </div>
         </section>
@@ -108,7 +109,7 @@
     <div class="dialog-top"><div><p class="eyebrow">CONFIRM SOURCE</p><h2 id="confirm-title">Is this the right video?</h2></div><button class="icon-button" type="button" id="close-dialog" aria-label="Close preview">×</button></div>
     <div class="embed-wrap"><iframe id="youtube-preview" title="YouTube video confirmation preview" referrerpolicy="strict-origin-when-cross-origin" allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe></div>
     <p id="confirm-selection" class="confirm-selection">Video · MP4 · Best available</p>
-    <p id="confirm-help" class="dialog-help">Check the preview before starting. You can also <a id="open-youtube" href="#" target="_blank" rel="noopener noreferrer">open the video on YouTube</a> if it doesn't play here.</p>
+    <p id="confirm-help" class="dialog-help">Check the preview before starting. You can also <a id="open-youtube" target="_blank" rel="noopener noreferrer">open the video on YouTube</a> if it doesn't play here.</p>
     <div class="dialog-actions"><button class="secondary-button" type="button" id="back-button">Go back</button><button class="primary-button" type="button" id="continue-button">Start export <span aria-hidden="true">→</span></button></div>
   </dialog>
   <div class="toast-region" id="toast-region" role="region" aria-label="Notifications" aria-live="polite" aria-atomic="false"></div>

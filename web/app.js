@@ -32,9 +32,10 @@
     toasts: $("toast-region"), media: $("media-type"), format: $("output-format"),
     quality: $("output-quality"), bitrate: $("audio-bitrate"), bitrateField: $("bitrate-field"),
     urlError: $("url-error"), tokenError: $("token-error"), bitrateError: $("bitrate-error"),
-    selection: $("confirm-selection")
+    selection: $("confirm-selection"), jobId: $("job-id"), retry: $("retry-button"),
+    checkJob: $("check-job-button"), cancelRecovery: $("cancel-recovery-button")
   };
-  const state = { token: "", url: "", configuration: null, jobId: null, controller: null, objectUrl: null, run: 0, busy: false, phase: "idle", view: null };
+  const state = { token: "", url: "", configuration: null, jobId: null, jobOutstanding: false, controller: null, objectUrl: null, run: 0, busy: false, phase: "idle", view: null };
   const jobStatuses = new Set(["queued", "running", "completed", "failed", "cancelled"]);
   const progressStages = new Set(["extracting", "downloading", "processing", "completed"]);
   const errorCodes = new Set(["INVALID_REQUEST", "UNAUTHORIZED", "NOT_FOUND", "QUEUE_FULL", "RATE_LIMITED", "CANCELLED", "NETWORK", "DNS", "ACCESS_RESTRICTED", "UPSTREAM_RATE_LIMITED", "PLAYER_CHANGED", "UNSUPPORTED_FORMAT", "EXPIRED_URL", "DOWNLOAD_INTERRUPTED", "DOWNLOAD_TOO_LARGE", "FFMPEG_FAILED", "STORAGE", "TIMEOUT", "INTERNAL"]);
@@ -65,7 +66,13 @@
   }
   function step(next, captured) {
     if (state.phase === next) return;
-    state.phase = next; diagnostic("info", "workflow.step", {}, captured ? { ...captured, phase: next } : context());
+    state.phase = next;
+    const current = next === "confirmation" ? "configure" : ["submitting", "queued", "running", "checking", "cancelling", "completed", "file_transfer", "ready", "failed", "cancelled"].includes(next) ? "export" : "source";
+    for (const name of ["source", "configure", "export"]) {
+      const item = $("step-" + name); item.dataset.current = String(name === current);
+      if (name === current) item.setAttribute("aria-current", "step"); else item.removeAttribute("aria-current");
+    }
+    diagnostic("info", "workflow.step", {}, captured ? { ...captured, phase: next } : context());
   }
   function safeMessage(value, fallback) {
     if (typeof value !== "string" || !value.trim()) return fallback;
@@ -173,15 +180,19 @@
     ui.success.hidden = next !== "success"; ui.error.hidden = next !== "error";
     ui.pill.dataset.stage = next;
     ui.pill.textContent = { idle: "WAITING", working: "PROCESSING", success: "READY", error: "NEEDS ATTENTION" }[next];
-    state.busy = next === "working"; ui.button.disabled = state.busy; ui.url.disabled = state.busy;
+    state.busy = next === "working"; ui.button.disabled = state.busy || state.jobOutstanding; ui.url.disabled = state.busy;
+    ui.jobId.hidden = !uuid(state.jobId);
+    ui.jobId.textContent = uuid(state.jobId) ? "Job ID · " + state.jobId : "";
     ui.cancel.hidden = true; ui.progressArea.hidden = true;
   }
   function working(title, description, canCancel = false, percentage = null) {
     mode("working"); ui.workTitle.textContent = title; ui.workText.textContent = description;
     ui.cancel.hidden = !canCancel;
+    ui.progressArea.hidden = false;
     if (Number.isFinite(percentage) && percentage >= 0 && percentage <= 100) {
-      ui.progressArea.hidden = false; ui.progress.value = percentage;
-      ui.progressNumber.textContent = Math.round(percentage) + "%";
+      ui.progress.value = percentage; ui.progressNumber.textContent = Math.round(percentage) + "%";
+    } else {
+      ui.progress.removeAttribute("value"); ui.progressNumber.textContent = "In progress";
     }
   }
   function failure(error, prefix = "", captured = context()) {
@@ -190,7 +201,10 @@
     diagnostic(details.error_kind === "job_cancelled" ? "info" : "error", details.error_kind === "job_cancelled" ? "workflow.cancelled" : "workflow.failed", details, captured);
     const extra = ["Step: " + captured.phase, uuid(captured.jobId) ? "Job: " + captured.jobId : "", errorCodes.has(details.error_code) ? "Code: " + details.error_code : ""].filter(Boolean).join(" · ");
     step(details.error_kind === "job_cancelled" ? "cancelled" : "failed");
-    mode("error"); ui.errorText.textContent = message + " " + extra; toast(message);
+    mode("error"); ui.errorText.textContent = message + " " + extra;
+    const recoverable = Boolean(uuid(state.jobId) && state.jobOutstanding);
+    ui.retry.hidden = recoverable; ui.checkJob.hidden = !recoverable; ui.cancelRecovery.hidden = !recoverable;
+    toast(message);
   }
   function requireToken() {
     const value = ui.token.value;
@@ -220,7 +234,7 @@
     try {
       const result = await fetch(path, {
         method: options.method || "GET",
-        headers: { Authorization: "Bearer " + state.token, ...(options.body === undefined ? {} : { "Content-Type": "application/json" }) },
+        headers: { Authorization: "Bearer " + state.token, ...(options.body === undefined ? {} : { "Content-Type": "application/json" }), ...(uuid(options.idempotencyKey) ? { "X-Idempotency-Key": options.idempotencyKey } : {}) },
         body: options.body === undefined ? undefined : JSON.stringify(options.body),
         signal: controller.signal, cache: "no-store", credentials: "omit", redirect: "error"
       });
@@ -229,7 +243,7 @@
       if (!result.ok) {
         let payload = null;
         try { payload = await result.json(); } catch { /* non-JSON proxy response */ }
-        if (result.status === 401) throw appError("The API token was rejected. Check Private API access and retry.", { error_kind: "http", error_code: "UNAUTHORIZED" });
+        if (result.status === 401) throw appError("The API token was rejected. Check Private API access and retry.", { error_kind: "http", error_code: "UNAUTHORIZED", http_status: result.status });
         throw backendError(payload?.error, "The service returned HTTP " + result.status + ".", "http", result.status);
       }
       const value = options.file ? await result.blob() : result.status === 204 ? null : await result.json();
@@ -281,16 +295,17 @@
     ui.filesize.textContent = fileSize(blob.size) + " · MP4 video";
     ui.download.href = state.objectUrl;
     ui.download.download = safeName.endsWith(".mp4") ? safeName : "video.mp4";
-    step("ready"); mode("success"); diagnostic("info", "preview.ready", { bytes: blob.size });
+    state.jobOutstanding = false; step("ready"); mode("success"); diagnostic("info", "preview.ready", { bytes: blob.size });
     toast("Your MP4 was generated successfully and is ready to download.", true);
   }
-  async function poll(signal, run) {
+  async function poll(signal, run, immediate = false) {
     const deadline = Date.now() + 35 * 60 * 1000;
-    let lastStatus = "", lastProgress = "";
+    let lastStatus = "", lastProgress = "", first = true;
     diagnostic("info", "poll.started");
     while (Date.now() < deadline) {
       if (run !== state.run) return;
-      await sleep(4000, signal);
+      if (!first || !immediate) await sleep(4000, signal);
+      first = false;
       const job = await request("/api/v1/downloads/" + state.jobId, { signal });
       if (run !== state.run) return;
       if (!job || !jobStatuses.has(job.status)) throw appError("Unexpected job status from the backend.", { error_kind: "protocol" });
@@ -300,6 +315,7 @@
       }
       if (job.status === "completed") { step("completed"); await loadVideo(job, signal, run); return; }
       if (job.status === "failed" || job.status === "cancelled") {
+        state.jobOutstanding = false;
         const error = backendError(job.error, "The job " + job.status + ".", "job_" + job.status);
         diagnostic(job.status === "cancelled" ? "info" : "error", "job." + job.status, { ...error.diagnostic, job_status: job.status, http_status: 200 });
         throw error;
@@ -316,43 +332,62 @@
     throw appError("The job is taking longer than expected. Check Railway before creating another.", { error_kind: "timeout", error_code: "TIMEOUT" });
   }
   async function generate() {
-    if (state.busy || !requireToken()) return;
+    if (state.busy || state.jobOutstanding || !requireToken()) return;
     diagnostic("info", "confirmation.accepted", {}, preparationContext());
     ui.dialog.close(); discardPreview();
-    state.run += 1; const run = state.run; state.jobId = null;
+    state.run += 1; const run = state.run; state.jobId = null; state.jobOutstanding = false;
+    // A supplied UUID is both an idempotency key and the server's job ID. Retain it
+    // if admission becomes uncertain, so the operator can check or cancel safely.
+    const submissionId = typeof window.crypto?.randomUUID === "function" ? uuid(window.crypto.randomUUID()) : null;
     const controller = new AbortController(); state.controller = controller;
     step("submitting"); diagnostic("info", "job.submission_started");
     working("Starting your download", "Sending your confirmed video to the extractor.");
     try {
       const job = await request("/api/v1/downloads", {
         method: "POST", body: { url: state.url, ...state.configuration },
-        signal: controller.signal
+        signal: controller.signal, idempotencyKey: submissionId
       });
       if (run !== state.run) return;
-      if (!uuid(job?.job_id)) throw appError("The backend did not return a valid job ID.", { error_kind: "protocol" });
-      state.jobId = job.job_id; diagnostic("info", "job.submitted"); step("queued");
+      if (!uuid(job?.job_id) || (submissionId && job.job_id !== submissionId)) throw appError("The backend did not return a valid job ID.", { error_kind: "protocol" });
+      state.jobId = job.job_id; state.jobOutstanding = true; diagnostic("info", "job.submitted"); step("queued");
       working("Waiting in the queue", "Your video is queued for processing.", true);
       await poll(controller.signal, run);
     } catch (error) {
-      if (run === state.run && !controller.signal.aborted) failure(error);
+      if (run === state.run && !controller.signal.aborted) {
+        const detail = error?.diagnostic || {};
+        if (!state.jobId && submissionId && (["network", "timeout", "protocol"].includes(detail.error_kind) || (detail.error_kind === "http" && detail.http_status >= 500))) {
+          state.jobId = submissionId; state.jobOutstanding = true;
+        }
+        failure(error);
+      }
     } finally { if (run === state.run) state.controller = null; }
   }
+  async function checkJob() {
+    if (state.busy || !state.jobOutstanding || !uuid(state.jobId) || !requireToken()) return;
+    state.run += 1; const run = state.run;
+    const controller = new AbortController(); state.controller = controller;
+    step("checking"); working("Checking your export", "Looking up the latest job status.", true);
+    try { await poll(controller.signal, run, true); }
+    catch (error) { if (run === state.run && !controller.signal.aborted) failure(error); }
+    finally { if (run === state.run) state.controller = null; }
+  }
   async function cancel() {
-    if (!state.busy || !state.jobId) return;
+    if (!state.jobOutstanding || !uuid(state.jobId) || (state.busy && state.phase === "cancelling")) return;
     const id = state.jobId; state.run += 1; step("cancelling");
     const captured = context(); diagnostic("info", "cancel.requested", {}, captured);
-    state.controller?.abort(); state.controller = null; state.jobId = null;
-    working("Cancelling", "Stopping your generation job.");
+    state.controller?.abort(); state.controller = null;
+    working("Cancelling", "Stopping your export.");
     try {
       await request("/api/v1/downloads/" + id, { method: "DELETE", context: captured });
-      diagnostic("info", "cancel.confirmed", {}, captured); step("idle"); mode("idle"); toast("Generation cancelled.", true);
+      diagnostic("info", "cancel.confirmed", {}, captured); state.jobId = null; state.jobOutstanding = false;
+      step("idle"); mode("idle"); toast("Export cancelled.", true);
     } catch (error) {
       diagnostic("error", "cancel.failed", error.diagnostic, captured);
       failure(error, "Could not confirm cancellation. ", captured);
     }
   }
   function reset() {
-    if (state.busy) return;
+    if (state.busy || state.jobOutstanding) return;
     diagnostic("info", "workflow.reset");
     state.run += 1; state.jobId = null; discardPreview(); step("idle"); mode("idle"); ui.url.focus();
   }
@@ -370,7 +405,7 @@
     $("token-toggle").setAttribute("aria-pressed", String(visible));
   });
   ui.form.addEventListener("submit", (event) => {
-    event.preventDefault(); if (state.busy) return;
+    event.preventDefault(); if (state.busy || state.jobOutstanding) return;
     diagnostic("info", "source.validation_started", {}, preparationContext());
     let value;
     try { value = validateLink(ui.url.value); }
@@ -390,6 +425,8 @@
   });
   ui.confirm.addEventListener("click", generate);
   ui.cancel.addEventListener("click", cancel);
+  ui.checkJob.addEventListener("click", checkJob);
+  ui.cancelRecovery.addEventListener("click", cancel);
   $("new-video-button").addEventListener("click", reset);
   $("retry-button").addEventListener("click", reset);
   ui.video.addEventListener("error", () => {

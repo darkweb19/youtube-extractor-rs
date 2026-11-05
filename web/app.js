@@ -1,7 +1,7 @@
 (() => {
   "use strict";
   const $ = (id) => document.getElementById(id);
-  // Only the display preference is persisted. Access credentials stay in memory.
+  // Only the display preference is stored in JavaScript-accessible storage.
   const themeButton = $("theme-toggle");
   let theme = "light";
   try { theme = window.localStorage?.getItem("frame-theme") || ""; } catch { theme = ""; }
@@ -34,18 +34,22 @@
     quality: $("output-quality"), bitrate: $("audio-bitrate"), bitrateField: $("bitrate-field"),
     urlError: $("url-error"), tokenError: $("token-error"), bitrateError: $("bitrate-error"),
     selection: $("confirm-selection"), jobId: $("job-id"), retry: $("retry-button"),
-    checkJob: $("check-job-button"), cancelRecovery: $("cancel-recovery-button")
+    checkJob: $("check-job-button"), cancelRecovery: $("cancel-recovery-button"),
+    sessionStatus: $("session-status"), sessionMessage: $("session-message"),
+    sessionRetry: $("session-retry-button"), saveAccess: $("save-access-button"),
+    forgetAccess: $("forget-access-button")
   };
-  const state = { token: "", url: "", configuration: null, jobId: null, jobOutstanding: false, tokenFocusPending: false, controller: null, objectUrl: null, run: 0, busy: false, phase: "idle", view: null };
+  const state = { access: "checking", sessionAction: null, sessionError: "", actionPending: false, confirmationVersion: 0, url: "", configuration: null, jobId: null, jobOutstanding: false, tokenFocusPending: false, controller: null, objectUrl: null, run: 0, busy: false, phase: "idle", view: null };
+  let sessionTask = null;
   const jobStatuses = new Set(["queued", "running", "completed", "failed", "cancelled"]);
   const progressStages = new Set(["extracting", "downloading", "processing", "completed"]);
   const errorCodes = new Set(["INVALID_REQUEST", "UNAUTHORIZED", "NOT_FOUND", "QUEUE_FULL", "RATE_LIMITED", "CANCELLED", "NETWORK", "DNS", "ACCESS_RESTRICTED", "UPSTREAM_RATE_LIMITED", "PLAYER_CHANGED", "UNSUPPORTED_FORMAT", "EXPIRED_URL", "DOWNLOAD_INTERRUPTED", "DOWNLOAD_TOO_LARGE", "FFMPEG_FAILED", "STORAGE", "TIMEOUT", "INTERNAL"]);
-  const uuid = (value) => typeof value === "string" && ![state.token, ui.token.value].includes(value) && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) ? value : null;
+  const uuid = (value) => typeof value === "string" && value !== ui.token.value && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) ? value : null;
   let requestNumber = 0;
   function context() { return { run: state.run, phase: state.phase, jobId: uuid(state.jobId) }; }
   function preparationContext() { return { run: state.run, phase: state.phase, jobId: null }; }
   function routeName(path) {
-    if (path === "/api/v1/downloads") return path;
+    if (path === "/api/v1/downloads" || path === "/api/v1/session") return path;
     if (/^\/api\/v1\/downloads\/[0-9a-f-]{36}\/file$/i.test(path)) return "/api/v1/downloads/:job_id/file";
     if (/^\/api\/v1\/downloads\/[0-9a-f-]{36}$/i.test(path)) return "/api/v1/downloads/:job_id";
     return "unknown";
@@ -56,7 +60,7 @@
     for (const key of ["request_id", "elapsed_ms", "http_status", "controller_http_status", "bytes", "playback_code"])
       if (Number.isSafeInteger(details[key]) && details[key] >= 0) entry[key] = details[key];
     if (["GET", "POST", "DELETE"].includes(details.method)) entry.method = details.method;
-    if (["/api/v1/downloads", "/api/v1/downloads/:job_id", "/api/v1/downloads/:job_id/file"].includes(details.route)) entry.route = details.route;
+    if (["/api/v1/session", "/api/v1/downloads", "/api/v1/downloads/:job_id", "/api/v1/downloads/:job_id/file"].includes(details.route)) entry.route = details.route;
     if (["GET /status", "POST /start", "POST /stop"].includes(details.controller_operation)) entry.controller_operation = details.controller_operation;
     if (errorCodes.has(details.error_code)) entry.error_code = details.error_code;
     if (["http", "timeout", "abort", "network", "protocol", "job_failed", "job_cancelled", "validation", "playback", "unknown"].includes(details.error_kind)) entry.error_kind = details.error_kind;
@@ -78,7 +82,7 @@
   function safeMessage(value, fallback) {
     if (typeof value !== "string" || !value.trim()) return fallback;
     let message = value;
-    for (const secret of [state.token, ui.token.value])
+    for (const secret of [ui.token.value])
       if (secret) message = message.split(secret).join("[redacted]");
     return message.replace(/(?:https?:\/\/|blob:)\S+/gi, "[redacted URL]")
       .replace(/Bearer\s+\S+/gi, "Bearer [redacted]").slice(0, 800);
@@ -193,9 +197,7 @@
     ui.success.hidden = next !== "success"; ui.error.hidden = next !== "error";
     ui.pill.dataset.stage = next;
     ui.pill.textContent = { idle: "WAITING", working: "PROCESSING", success: "READY", error: "NEEDS ATTENTION" }[next];
-    state.busy = next === "working"; ui.button.disabled = state.busy || state.jobOutstanding; ui.url.disabled = state.busy;
-    for (const field of [ui.media, ui.format, ui.quality, ui.bitrate]) field.disabled = state.busy || state.jobOutstanding;
-    ui.token.disabled = state.busy; $("token-toggle").disabled = state.busy;
+    state.busy = next === "working"; syncControls();
     ui.jobId.hidden = !uuid(state.jobId);
     ui.jobId.textContent = uuid(state.jobId) ? "Job ID · " + state.jobId : "";
     ui.cancel.hidden = true; ui.progressArea.hidden = true;
@@ -221,17 +223,131 @@
     ui.retry.hidden = recoverable; ui.checkJob.hidden = !recoverable; ui.cancelRecovery.hidden = !recoverable;
     toast(message); revealResult(ui.errorTitle);
   }
-  function requireToken() {
+  function syncControls() {
+    const locked = state.busy || state.actionPending;
+    ui.button.disabled = locked || state.jobOutstanding;
+    ui.url.disabled = locked;
+    for (const field of [ui.media, ui.format, ui.quality, ui.bitrate]) field.disabled = locked || state.jobOutstanding;
+    const tokenLocked = locked || state.sessionAction === "save" || state.sessionAction === "forget";
+    ui.token.disabled = tokenLocked; $("token-toggle").disabled = tokenLocked;
+    ui.saveAccess.disabled = locked || Boolean(state.sessionAction);
+    ui.forgetAccess.disabled = locked || state.jobOutstanding || Boolean(state.sessionAction);
+    ui.sessionRetry.disabled = locked || Boolean(state.sessionAction);
+    ui.confirm.disabled = state.actionPending || state.sessionAction === "save" || state.sessionAction === "forget";
+    ui.saveAccess.textContent = state.sessionAction === "save" ? "Saving…" : "Save access";
+  }
+  function renderAccess() {
+    const ready = state.access === "saved" || state.access === "open";
+    ui.access.hidden = ready;
+    ui.sessionStatus.hidden = !ready && !state.sessionAction && !state.sessionError;
+    ui.sessionStatus.dataset.state = state.sessionError ? "error" : state.access;
+    ui.sessionMessage.textContent = state.sessionAction === "check" ? "Checking access…" :
+      state.sessionAction === "save" ? "Saving access…" :
+      state.sessionAction === "forget" ? "Removing access…" :
+      state.sessionError || (state.access === "saved" ? "Access saved" : "Access ready");
+    ui.forgetAccess.hidden = state.access !== "saved";
+    ui.sessionRetry.hidden = !state.sessionError;
+    syncControls();
+  }
+  function focusAccess() {
+    if (ui.dialog.open) { state.tokenFocusPending = true; ui.dialog.close(); }
+    ui.access.open = true; ui.token.focus();
+  }
+  function accessResult(result) {
+    if (!result || result.authenticated !== true || typeof result.saved !== "boolean")
+      throw appError("The service returned an invalid access status.", { error_kind: "protocol" });
+    state.access = result.saved ? "saved" : "open";
+    state.sessionError = ""; ui.token.value = "";
+    ui.token.type = "password"; $("token-toggle").textContent = "Show";
+    $("token-toggle").setAttribute("aria-label", "Show access token");
+    $("token-toggle").setAttribute("aria-pressed", "false");
+    fieldError(ui.token, ui.tokenError);
+    diagnostic("info", "access.ready", {}, preparationContext());
+  }
+  function runSession(action, operation) {
+    if (sessionTask) return sessionTask;
+    state.sessionAction = action; renderAccess();
+    sessionTask = (async () => {
+      try { return await operation(); }
+      finally { state.sessionAction = null; sessionTask = null; renderAccess(); }
+    })();
+    return sessionTask;
+  }
+  async function refreshAccess() {
+    if (sessionTask) return sessionTask;
+    return runSession("check", async () => {
+      try {
+        accessResult(await request("/api/v1/session", { quietUnauthorized: true, context: preparationContext() }));
+        return true;
+      } catch (error) {
+        state.access = "required";
+        state.sessionError = error?.diagnostic?.http_status === 401 ? "" : "Couldn't check saved access. Enter a token or check again.";
+        return false;
+      }
+    });
+  }
+  async function saveAccess() {
+    if (sessionTask) await sessionTask;
+    if (state.access === "saved" || state.access === "open") return true;
     const value = ui.token.value;
     if (value.length < 32 || value.length > 4096 || !/^[!-~]+$/.test(value)) {
-      if (ui.dialog.open) { state.tokenFocusPending = true; ui.dialog.close(); }
-      ui.access.open = true; ui.token.focus();
       diagnostic("warn", "access.validation_failed", { error_kind: "validation" }, preparationContext());
       fieldError(ui.token, ui.tokenError, "Enter a token of 32–4096 visible characters, with no spaces.");
       return false;
     }
-    fieldError(ui.token, ui.tokenError);
-    state.token = value; diagnostic("info", "access.ready", {}, preparationContext()); return true;
+    fieldError(ui.token, ui.tokenError); state.sessionError = "";
+    return runSession("save", async () => {
+      let accepted = false;
+      try {
+        await request("/api/v1/session", { method: "POST", bearer: value, context: preparationContext() });
+        accepted = true;
+        accessResult(await request("/api/v1/session", { quietUnauthorized: true, context: preparationContext() }));
+        return true;
+      } catch (error) {
+        state.access = "required";
+        const unauthorized = error?.diagnostic?.http_status === 401;
+        fieldError(ui.token, ui.tokenError, unauthorized && accepted ? "Access couldn't be saved. Allow cookies for this site and try again." :
+          unauthorized ? "The access token was rejected. Check it and try again." :
+            "Couldn't save access. Check the connection and try again.");
+        return false;
+      }
+    });
+  }
+  async function ensureAccess() {
+    if (sessionTask) await sessionTask;
+    return state.access === "saved" || state.access === "open" || await saveAccess();
+  }
+  async function prepareAccess() {
+    state.actionPending = true; syncControls();
+    try { return await ensureAccess(); }
+    catch {
+      state.access = "required";
+      state.sessionError = "Couldn't check access. Enter a token or check again.";
+      renderAccess(); return false;
+    } finally { state.actionPending = false; syncControls(); }
+  }
+  async function forgetAccess() {
+    if (state.busy || state.actionPending || state.jobOutstanding || sessionTask || state.access !== "saved") return;
+    await runSession("forget", async () => {
+      try {
+        await request("/api/v1/session", { method: "DELETE", context: preparationContext() });
+        ui.token.value = ""; fieldError(ui.token, ui.tokenError);
+        state.access = "required";
+        try {
+          const result = await request("/api/v1/session", { quietUnauthorized: true, context: preparationContext() });
+          accessResult(result);
+          if (result.saved) {
+            state.sessionError = "Couldn't remove saved access. Check browser settings and try again.";
+            return;
+          }
+        } catch (error) {
+          if (error?.diagnostic?.http_status !== 401) throw error;
+        }
+        state.sessionError = ""; toast("Access removed from this browser.", true);
+      } catch {
+        state.sessionError = "Couldn't confirm access was removed. Check again.";
+      }
+    });
   }
   async function request(path, options = {}) {
     const captured = options.context || context();
@@ -250,16 +366,23 @@
     try {
       const result = await fetch(path, {
         method: options.method || "GET",
-        headers: { Authorization: "Bearer " + state.token, ...(options.body === undefined ? {} : { "Content-Type": "application/json" }), ...(uuid(options.idempotencyKey) ? { "X-Idempotency-Key": options.idempotencyKey } : {}) },
+        headers: { "X-Frame-Client": "1", ...(options.bearer ? { Authorization: "Bearer " + options.bearer } : {}), ...(options.body === undefined ? {} : { "Content-Type": "application/json" }), ...(uuid(options.idempotencyKey) ? { "X-Idempotency-Key": options.idempotencyKey } : {}) },
         body: options.body === undefined ? undefined : JSON.stringify(options.body),
-        signal: controller.signal, cache: "no-store", credentials: "omit", redirect: "error"
+        signal: controller.signal, cache: "no-store", credentials: "same-origin", redirect: "error"
       });
       details.http_status = result.status;
       diagnostic(level, "request.response", { ...details, elapsed_ms: elapsed() }, captured);
       if (!result.ok) {
         let payload = null;
         try { payload = await result.json(); } catch { /* non-JSON proxy response */ }
-        if (result.status === 401) throw appError("The API token was rejected. Check your API access token and retry.", { error_kind: "http", error_code: "UNAUTHORIZED", http_status: result.status });
+        if (result.status === 401) {
+          if (path !== "/api/v1/session") {
+            state.access = "required"; state.sessionError = ""; ui.access.open = true;
+            fieldError(ui.token, ui.tokenError, "Saved access expired. Enter your access token and save it again.");
+            renderAccess();
+          }
+          throw appError(path === "/api/v1/session" ? "Access was not authorized." : "Access expired. Save your API access token again, then retry.", { error_kind: "http", error_code: "UNAUTHORIZED", http_status: result.status });
+        }
         throw backendError(payload?.error, "The service returned HTTP " + result.status + ".", "http", result.status);
       }
       const value = options.file ? await result.blob() : result.status === 204 ? null : await result.json();
@@ -276,7 +399,8 @@
         error = appError("The service returned an invalid response. Check the service and retry.", { error_kind: "protocol" });
       else if (!caught?.diagnostic)
         error = appError("The service returned an unexpected response. Check the service and retry.", { error_kind: "protocol" });
-      diagnostic(error.diagnostic.error_kind === "abort" ? "info" : "error", error.diagnostic.error_kind === "abort" ? "request.aborted" : "request.failed", { ...details, ...error.diagnostic, elapsed_ms: elapsed() }, captured);
+      const quiet = options.quietUnauthorized && error.diagnostic.http_status === 401;
+      diagnostic(quiet ? "debug" : error.diagnostic.error_kind === "abort" ? "info" : "error", quiet ? "request.unauthenticated" : error.diagnostic.error_kind === "abort" ? "request.aborted" : "request.failed", { ...details, ...error.diagnostic, elapsed_ms: elapsed() }, captured);
       throw error;
     } finally {
       clearTimeout(timer); options.signal?.removeEventListener("abort", forward);
@@ -298,8 +422,8 @@
       throw appError("The backend returned an unexpected download URL.", { error_kind: "protocol" });
     step("file_transfer"); diagnostic("info", "file.transfer_started");
     working("Preparing your preview", "Loading your file for playback and download.");
-    // The file is bearer-protected; <video src> cannot attach an Authorization header.
-    // Fetch once and share the transient blob URL with the player and download link.
+    // Fetch the authenticated file once and share its transient blob URL with
+    // the player and download link.
     const blob = await request(url, { signal, file: true });
     if (run !== state.run) return;
     if (!blob.size) throw appError("The backend returned an empty file.", { error_kind: "protocol" });
@@ -356,7 +480,11 @@
     throw appError("The job is taking longer than expected. Check this job before creating another.", { error_kind: "timeout", error_code: "TIMEOUT" });
   }
   async function generate() {
-    if (state.busy || state.jobOutstanding || !requireToken()) return;
+    if (state.busy || state.jobOutstanding || state.actionPending) return;
+    const confirmation = state.confirmationVersion;
+    const authorized = await prepareAccess();
+    if (!ui.dialog.open || state.confirmationVersion !== confirmation) return;
+    if (!authorized) { focusAccess(); return; }
     diagnostic("info", "confirmation.accepted", {}, preparationContext());
     ui.dialog.close(); discardPreview();
     state.run += 1; const run = state.run; state.jobId = null; state.jobOutstanding = false;
@@ -387,7 +515,9 @@
     } finally { if (run === state.run) state.controller = null; }
   }
   async function checkJob() {
-    if (state.busy || !state.jobOutstanding || !uuid(state.jobId) || !requireToken()) return;
+    if (state.busy || state.actionPending || !state.jobOutstanding || !uuid(state.jobId)) return;
+    const authorized = await prepareAccess();
+    if (!authorized) { focusAccess(); return; }
     state.run += 1; const run = state.run;
     const controller = new AbortController(); state.controller = controller;
     step("checking"); working("Checking your export", "Looking up the latest job status.", true); revealResult(ui.workTitle);
@@ -396,8 +526,11 @@
     finally { if (run === state.run) state.controller = null; }
   }
   async function cancel() {
-    if (!state.jobOutstanding || !uuid(state.jobId) || (state.busy && state.phase === "cancelling")) return;
-    if (!state.busy && !requireToken()) return;
+    if (!state.jobOutstanding || !uuid(state.jobId) || state.actionPending || (state.busy && state.phase === "cancelling")) return;
+    if (!state.busy) {
+      const authorized = await prepareAccess();
+      if (!authorized) { focusAccess(); return; }
+    }
     const id = state.jobId; state.run += 1; step("cancelling");
     const captured = context(); diagnostic("info", "cancel.requested", {}, captured);
     state.controller?.abort(); state.controller = null;
@@ -412,10 +545,16 @@
     }
   }
   function reset() {
-    if (state.busy || state.jobOutstanding) return;
+    if (state.busy || state.actionPending || state.jobOutstanding) return;
     diagnostic("info", "workflow.reset");
     state.run += 1; state.jobId = null; discardPreview(); step("idle"); mode("idle"); ui.url.focus();
   }
+  ui.saveAccess.addEventListener("click", async () => {
+    if (state.busy || state.actionPending || sessionTask) return;
+    if (!await saveAccess()) focusAccess();
+  });
+  ui.forgetAccess.addEventListener("click", forgetAccess);
+  ui.sessionRetry.addEventListener("click", () => { if (!state.busy && !state.actionPending) return refreshAccess(); });
   ui.media.addEventListener("change", updateMedia);
   ui.url.addEventListener("input", () => fieldError(ui.url, ui.urlError));
   ui.token.addEventListener("input", () => fieldError(ui.token, ui.tokenError));
@@ -430,7 +569,7 @@
     $("token-toggle").setAttribute("aria-pressed", String(visible));
   });
   ui.form.addEventListener("submit", (event) => {
-    event.preventDefault(); if (state.busy || state.jobOutstanding) return;
+    event.preventDefault(); if (state.busy || state.actionPending || state.jobOutstanding) return;
     diagnostic("info", "source.validation_started", {}, preparationContext());
     let value;
     try { value = validateLink(ui.url.value); }
@@ -440,12 +579,12 @@
     diagnostic("info", "source.validated", {}, preparationContext()); step("confirmation", preparationContext());
     state.configuration = config; ui.selection.textContent = describeConfiguration(config);
     state.url = value.canonical; ui.iframe.src = value.embed; ui.external.href = value.canonical;
-    ui.dialog.showModal(); $("back-button").focus(); diagnostic("info", "confirmation.opened", {}, preparationContext());
+    state.confirmationVersion += 1; ui.dialog.showModal(); $("back-button").focus(); diagnostic("info", "confirmation.opened", {}, preparationContext());
   });
   $("close-dialog").addEventListener("click", () => ui.dialog.close());
   $("back-button").addEventListener("click", () => ui.dialog.close());
   ui.dialog.addEventListener("close", () => {
-    ui.iframe.removeAttribute("src");
+    state.confirmationVersion += 1; ui.iframe.removeAttribute("src");
     if (state.tokenFocusPending) { state.tokenFocusPending = false; ui.token.focus(); }
     else if (!state.busy) ui.button.focus();
     diagnostic("debug", "confirmation.closed", {}, preparationContext());
@@ -469,5 +608,5 @@
   }
   ui.download.addEventListener("click", () => { if (state.objectUrl) diagnostic("info", "file.download_clicked"); });
   window.addEventListener("pagehide", () => { if (state.objectUrl) URL.revokeObjectURL(state.objectUrl); });
-  mode("idle"); diagnostic("info", "app.ready");
+  mode("idle"); renderAccess(); void refreshAccess(); diagnostic("info", "app.ready");
 })();

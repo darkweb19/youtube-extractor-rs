@@ -217,3 +217,23 @@ progress::-webkit-progress-bar { background: var(--border); } progress::-webkit-
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } }
 @media (forced-colors: active) { * { scrollbar-color: auto; } .frame-corner, .stage-pill { border-color: CanvasText; } }
+.configuration { margin-top: 29px; padding-top: 25px; border-top: 1px solid var(--border); }
+.configuration-heading { display: flex; justify-content: space-between; align-items: end; gap: 10px; margin-bottom: 19px; }
+.configuration-heading .eyebrow { margin-bottom: 9px; }
+.configuration-heading h2 { font-size: 16px; }
+.configuration-note { color: var(--ink-faint); font-size: 11px; }
+.fields-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.field { min-width: 0; }
+.field select, .bitrate-input { width: 100%; height: 42px; padding: 0 11px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface); color: var(--ink); font-size: 12px; }
+.field select { cursor: pointer; }
+.field select:hover, .bitrate-input:hover { border-color: var(--ink-faint); }
+.field select:focus-visible { outline-offset: 2px; }
+.bitrate-input { display: flex; align-items: center; padding: 0; }
+.bitrate-input:focus-within { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-wash); }
+.bitrate-input:has([aria-invalid="true"]) { border-color: var(--danger); }
+.bitrate-input input { min-width: 0; width: 100%; height: 100%; padding: 0 4px 0 11px; border: 0; outline: 0; background: transparent; color: var(--ink); }
+.bitrate-input span { padding-right: 10px; color: var(--ink-quiet); font: 10px var(--font-mono); }
+.optional { float: right; color: var(--ink-faint); font-weight: 400; }
+.confirm-selection { display: inline-block; margin: 15px 0 0; padding: 6px 9px; border-radius: 6px; background: var(--surface-muted); color: var(--ink-quiet); font: 11px var(--font-mono); }
+.confirm-selection + .dialog-help { margin-top: 12px; }
+@media (max-width: 480px) { .fields-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .configuration-note { display: none; } }

@@ -14,7 +14,7 @@ class Element {
   constructor(id) {
     this.id = id; this.value = ""; this.textContent = ""; this.hidden = false;
     this.disabled = false; this.dataset = {}; this.listeners = new Map(); this.children = [];
-    this.attributes = new Map(); this.open = false;
+    this.attributes = new Map(); this.open = false; this.type = "text";
   }
   addEventListener(name, callback) {
     if (!this.listeners.has(name)) this.listeners.set(name, []);
@@ -24,10 +24,16 @@ class Element {
     const event = { preventDefault() {} };
     await Promise.all((this.listeners.get(name) || []).map((callback) => callback(event)));
   }
-  setAttribute(name, value) { this.attributes.set(name, value); }
-  removeAttribute(name) { this.attributes.delete(name); }
+  setAttribute(name, value) { this.attributes.set(name, String(value)); }
+  getAttribute(name) { return this.attributes.get(name) ?? null; }
+  removeAttribute(name) {
+    this.attributes.delete(name);
+    if (name === "src" || name === "href") this[name] = "";
+  }
   append(...children) { this.children.push(...children); }
-  focus() { this.focused = true; }
+  replaceChildren(...children) { this.children = [...children]; }
+  focus(options) { this.focused = true; this.focusOptions = options; }
+  scrollIntoView(options) { this.scrollOptions = options; }
   pause() {}
   load() {}
   remove() {}
@@ -50,20 +56,38 @@ async function until(predicate) {
   }
   assert.fail("Expected browser event was not observed");
 }
-function app(fetcher) {
+function app(fetcher, { initialStorage = [], storageUnavailable = false, prefersDark = false, narrowScreen = false, reduceMotion = false, generatedIds = [jobId] } = {}) {
   const elements = new Map(), logs = [], requests = [], timers = new Map();
+  const storage = new Map(initialStorage);
+  const objectUrls = [], revokedUrls = [];
+  const ids = [...generatedIds];
   let timerId = 0;
   const element = (id) => {
     if (!elements.has(id)) elements.set(id, new Element(id));
     return elements.get(id);
   };
   class BrowserURL extends URL {
-    static createObjectURL() { return "blob:private-object-url"; }
-    static revokeObjectURL() {}
+    static createObjectURL() {
+      const url = objectUrls.length ? `blob:private-object-url-${objectUrls.length + 1}` : "blob:private-object-url";
+      objectUrls.push(url); return url;
+    }
+    static revokeObjectURL(url) { revokedUrls.push(url); }
   }
+  const windowObject = element("window");
+  const localStorage = {
+    getItem(key) { if (storageUnavailable) throw Error("Storage unavailable"); return storage.get(key) ?? null; },
+    setItem(key, value) { if (storageUnavailable) throw Error("Storage unavailable"); storage.set(key, String(value)); }
+  };
+  Object.defineProperty(windowObject, "localStorage", { get() { if (storageUnavailable) throw Error("Storage unavailable"); return localStorage; } });
+  windowObject.matchMedia = (query) => ({ matches:
+    query.includes("prefers-color-scheme: dark") ? prefersDark :
+      query.includes("prefers-reduced-motion: reduce") ? reduceMotion :
+        query.includes("max-width: 760px") ? narrowScreen : false
+  });
+  windowObject.crypto = { randomUUID() { return ids.shift() || jobId; } };
   const sandbox = {
-    document: { getElementById: element, createElement: (id) => new Element(id) },
-    window: new Element("window"), URL: BrowserURL, AbortController, DOMException, Blob,
+    document: { getElementById: element, createElement: (id) => new Element(id), documentElement: element("html") },
+    window: windowObject, URL: BrowserURL, AbortController, DOMException, Blob,
     Error, TypeError, SyntaxError, Date, performance,
     console: Object.fromEntries(["info", "debug", "warn", "error"].map((level) => [level, (...args) => logs.push({ level, prefix: args[0], ...args[1] })])),
     setTimeout(callback, delay) {
@@ -75,9 +99,10 @@ function app(fetcher) {
     async fetch(path, options) { requests.push({ path, options }); return fetcher(path, options); }
   };
   vm.runInNewContext(source, sandbox, { filename: "app.js" });
+  element("api-token").type = "password";
   element("api-token").value = token; element("youtube-url").value = video;
   return {
-    element, logs, requests,
+    element, logs, requests, storage, objectUrls, revokedUrls,
     async confirm() { await element("source-form").emit("submit"); },
     generate() { return element("continue-button").emit("click"); },
     fireTimeout(delay) {
@@ -86,9 +111,9 @@ function app(fetcher) {
   };
 }
 function events(browser, event) { return browser.logs.filter((entry) => entry.event === event); }
-function assertPrivate(browser) {
+function assertPrivate(browser, additionalSecrets = []) {
   const serialized = JSON.stringify(browser.logs);
-  for (const secret of [token, video, "abcdefghijk", "source-secret", upstreamSecret, "blob:private-object-url", "private-filename.mp4"])
+  for (const secret of [token, video, "abcdefghijk", "source-secret", upstreamSecret, "blob:private-object-url", "private-filename.mp4", ...additionalSecrets])
     assert.ok(!serialized.includes(secret), "Console must not expose " + secret);
   for (const entry of browser.logs) {
     assert.equal(entry.prefix, "[Frame]");
@@ -96,6 +121,55 @@ function assertPrivate(browser) {
     assert.ok(!("message" in entry) && !("headers" in entry) && !("body" in entry));
   }
 }
+
+async function configure(browser, { type, format, quality, bitrate }) {
+  browser.element("media-type").value = type;
+  await browser.element("media-type").emit("change");
+  browser.element("output-format").value = format;
+  browser.element("output-quality").value = quality;
+  if (bitrate !== undefined) browser.element("audio-bitrate").value = String(bitrate);
+}
+
+test("video and audio configuration is confirmed before dispatch and maps to valid request fields", async () => {
+  const expected = [
+    { type: "video", format: "webm", quality: "720p", body: { url: "https://www.youtube.com/watch?v=abcdefghijk", type: "video", format: "webm", quality: "720p" } },
+    { type: "audio", format: "mp3", quality: "best", bitrate: 192, body: { url: "https://www.youtube.com/watch?v=abcdefghijk", type: "audio", format: "mp3", quality: "best", audio_bitrate_kbps: 192 } },
+    { type: "audio", format: "original", quality: "best", body: { url: "https://www.youtube.com/watch?v=abcdefghijk", type: "audio", format: "original", quality: "best" } }
+  ];
+  const ids = [jobId, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"];
+  for (let index = 0; index < expected.length; index += 1) {
+    const item = expected[index];
+    const browser = app((path, options) => {
+      if (options.method === "POST") return response(202, { job_id: options.headers["X-Idempotency-Key"] });
+      if (path.endsWith("/file")) return response(200);
+      const id = path.split("/")[4];
+      return response(200, { job_id: id, status: "completed", output: { filename: "fixture-output.mp4", mime_type: item.type === "audio" ? "audio/mpeg" : "video/mp4" }, download_url: path + "/file" });
+    }, { generatedIds: [ids[index]] });
+    await configure(browser, item);
+    if (item.type === "audio") {
+      assert.deepEqual(browser.element("output-quality").children.map((option) => option.value), ["best"], "audio exposes only the adapter-supported quality");
+    }
+    await browser.confirm();
+    assert.equal(browser.requests.length, 0, "reviewing a source must not create extraction work");
+    await browser.generate();
+    const submitted = browser.requests.find(({ options }) => options.method === "POST");
+    assert.ok(submitted);
+    assert.deepEqual(JSON.parse(submitted.options.body), item.body);
+    assert.equal(submitted.options.headers["X-Idempotency-Key"], ids[index]);
+    assertPrivate(browser);
+  }
+});
+
+test("invalid audio bitrate is blocked before opening confirmation or creating a job", async () => {
+  const browser = app(() => response(500));
+  await configure(browser, { type: "audio", format: "mp3", quality: "best", bitrate: 321 });
+  await browser.confirm();
+  assert.equal(browser.requests.length, 0);
+  assert.equal(browser.element("confirm-dialog").open, false);
+  assert.match(browser.element("bitrate-error").textContent, /32 to 320/);
+  assert.equal(browser.element("audio-bitrate").getAttribute("aria-invalid"), "true");
+  assertPrivate(browser);
+});
 
 test("logs confirmation, job transitions, transfer and playback without logging private data", async () => {
   let polls = 0;
@@ -118,7 +192,29 @@ test("logs confirmation, job transitions, transfer and playback without logging 
   assert.equal(browser.element("stage-pill").textContent, "READY");
   assert.ok(browser.requests.every(({ options }) => options.headers.Authorization === `Bearer ${token}`));
   assert.equal(browser.logs.filter((entry) => entry.level === "error").length, 0);
+  const objectUrl = browser.objectUrls[0];
+  assert.equal(browser.element("result-video").src, objectUrl);
+  assert.equal(browser.element("download-link").href, objectUrl);
+  await browser.element("new-video-button").emit("click");
+  assert.deepEqual(browser.revokedUrls, [objectUrl], "starting another export revokes the previous Blob URL");
+  assert.equal(browser.element("result-video").src, "");
+  assert.equal(browser.element("download-link").href, "");
   assertPrivate(browser);
+});
+
+test("theme fallback tolerates invalid or unavailable storage and never stores the API token", async () => {
+  const invalid = app(() => response(500), { initialStorage: [["frame-theme", "violet"]], prefersDark: true });
+  assert.equal(invalid.element("html").getAttribute("data-theme"), "dark", "invalid stored preference follows system theme");
+  await invalid.element("theme-toggle").emit("click");
+  assert.equal(invalid.element("html").getAttribute("data-theme"), "light");
+  assert.equal(invalid.storage.get("frame-theme"), "light");
+  assert.ok(![...invalid.storage.values()].includes(token));
+
+  const unavailable = app(() => response(500), { storageUnavailable: true, prefersDark: true });
+  assert.equal(unavailable.element("html").getAttribute("data-theme"), "dark");
+  await unavailable.element("theme-toggle").emit("click");
+  assert.equal(unavailable.element("html").getAttribute("data-theme"), "light", "theme toggle still works when storage throws");
+  assert.equal(unavailable.logs.filter((entry) => entry.level === "error").length, 0);
 });
 
 test("terminal failed job is an error even when its poll returned HTTP 200", async () => {
@@ -212,6 +308,117 @@ test("a worker-cancelled job is recorded as cancellation rather than an error", 
   assertPrivate(browser);
 });
 
+test("a cancelled generation ignores a late completed poll response", async () => {
+  let finishPoll;
+  const browser = app((path, options) => {
+    if (options.method === "POST") return response(202, { job_id: jobId });
+    if (options.method === "DELETE") return response(204);
+    return new Promise((resolve) => { finishPoll = () => resolve(response(200, {
+      job_id: jobId, status: "completed", download_url: `/api/v1/downloads/${jobId}/file`
+    })); });
+  });
+  await browser.confirm();
+  const generation = browser.generate();
+  await until(() => browser.requests.length === 2);
+  await browser.element("cancel-button").emit("click");
+  assert.equal(browser.element("stage-pill").textContent, "WAITING");
+  finishPoll();
+  await generation;
+  assert.equal(browser.requests.some(({ path }) => path.endsWith("/file")), false, "late completion must not fetch a file after cancellation");
+  assert.equal(browser.element("success-state").hidden, true);
+  assert.equal(events(browser, "workflow.failed").length, 0);
+  assertPrivate(browser);
+});
+
+for (const [caseName, maliciousUrl] of [
+  ["off-origin URL", "https://attacker.invalid/collect"],
+  ["different job route", `/api/v1/downloads/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/file`],
+  ["query-tainted route", `/api/v1/downloads/${jobId}/file?next=https://attacker.invalid/collect`]
+]) test(`malicious completed-file URL is rejected before fetch: ${caseName}`, async () => {
+  const browser = app((path, options) => {
+    if (options.method === "POST") return response(202, { job_id: jobId });
+    if (path.endsWith(`/downloads/${jobId}`)) return response(200, {
+      job_id: jobId, status: "completed", output: { filename: "private-filename.mp4" }, download_url: maliciousUrl
+    });
+    return response(200);
+  });
+  await browser.confirm(); await browser.generate();
+  assert.equal(browser.requests.some(({ path }) => path.includes("/file")), false);
+  assert.equal(events(browser, "workflow.failed")[0]?.error_kind, "protocol");
+  assert.ok(browser.element("error-description").textContent.includes("unexpected download URL"));
+  assertPrivate(browser);
+});
+
+test("an uncertain POST can be looked up by its idempotency UUID using refreshed credentials", async () => {
+  const refreshedToken = "refreshed-private-api-token-012345678901";
+  const browser = app((path, options) => {
+    if (options.method === "POST") return response(500, { error: { code: "INTERNAL", message: "The response was interrupted." } });
+    if (path === `/api/v1/downloads/${jobId}`) return response(200, {
+      job_id: jobId, status: "completed", output: { filename: "private-filename.mp4", mime_type: "video/mp4" },
+      download_url: `/api/v1/downloads/${jobId}/file`
+    });
+    return response(200);
+  });
+  await browser.confirm(); await browser.generate();
+  const post = browser.requests[0];
+  assert.equal(post.options.method, "POST");
+  assert.equal(post.options.headers["X-Idempotency-Key"], jobId);
+  assert.equal(browser.element("check-job-button").hidden, false);
+  assert.equal(browser.element("job-id").textContent.includes(jobId), true);
+
+  browser.element("api-token").value = refreshedToken;
+  await browser.element("check-job-button").emit("click");
+  assert.deepEqual(browser.requests.map(({ options }) => options.method), ["POST", "GET", "GET"]);
+  assert.ok(browser.requests.slice(1).every(({ options }) => options.headers.Authorization === `Bearer ${refreshedToken}`));
+  assert.equal(browser.element("stage-pill").textContent, "READY");
+  assert.ok(![...browser.storage.values()].includes(refreshedToken));
+  assertPrivate(browser, [refreshedToken]);
+});
+
+test("recovery cancellation refreshes auth and sends DELETE for the retained idempotency UUID", async () => {
+  const refreshedToken = "second-private-api-token-012345678901234";
+  const browser = app((_, options) => options.method === "POST"
+    ? response(503, { error: { code: "QUEUE_FULL", message: "Admission could not be confirmed." } })
+    : response(204));
+  await browser.confirm(); await browser.generate();
+  assert.equal(browser.element("cancel-recovery-button").hidden, false);
+  browser.element("api-token").value = refreshedToken;
+  await browser.element("cancel-recovery-button").emit("click");
+  assert.deepEqual(browser.requests.map(({ options }) => options.method), ["POST", "DELETE"]);
+  assert.equal(browser.requests[1].path, `/api/v1/downloads/${jobId}`);
+  assert.equal(browser.requests[1].options.headers.Authorization, `Bearer ${refreshedToken}`);
+  assert.equal(browser.element("stage-pill").textContent, "WAITING");
+  assertPrivate(browser, [refreshedToken]);
+});
+
+test("a POST response with a different UUID is never trusted as the job identity", async () => {
+  const wrongId = "cccccccc-dddd-eeee-ffff-000000000000";
+  const browser = app(() => response(202, { job_id: wrongId }));
+  await browser.confirm(); await browser.generate();
+  assert.equal(browser.requests.length, 1);
+  assert.equal(browser.requests[0].options.headers["X-Idempotency-Key"], jobId);
+  assert.ok(browser.element("error-description").textContent.includes("valid job ID"));
+  assert.ok(browser.element("job-id").textContent.includes(jobId));
+  assert.ok(!browser.element("job-id").textContent.includes(wrongId));
+  assert.equal(browser.element("cancel-recovery-button").hidden, false);
+  assertPrivate(browser);
+});
+
+test("a poll response with a different UUID is rejected and retains only the requested job", async () => {
+  const wrongId = "dddddddd-eeee-ffff-0000-111111111111";
+  const browser = app((path, options) => options.method === "POST"
+    ? response(202, { job_id: jobId })
+    : response(200, { job_id: wrongId, status: "queued" }));
+  await browser.confirm(); await browser.generate();
+  assert.equal(browser.requests.length, 2);
+  assert.equal(events(browser, "workflow.failed")[0]?.error_kind, "protocol");
+  assert.ok(browser.element("job-id").textContent.includes(jobId));
+  assert.ok(!browser.element("job-id").textContent.includes(wrongId));
+  assert.equal(browser.element("check-job-button").hidden, false);
+  assert.equal(browser.requests.some(({ path }) => path.endsWith("/file")), false);
+  assertPrivate(browser);
+});
+
 
 test("pre-submission diagnostics never reuse a completed job ID for the next video", async () => {
   let submissions = 0;
@@ -220,7 +427,7 @@ test("pre-submission diagnostics never reuse a completed job ID for the next vid
     if (options.method === "POST") return response(202, { job_id: ++submissions === 1 ? jobId : nextId });
     if (path.endsWith("/file")) return response(200);
     return response(200, { status: "completed", download_url: path + "/file" });
-  });
+  }, { generatedIds: [jobId, nextId] });
   await browser.confirm(); await browser.generate();
   const firstRunCount = browser.logs.length;
   await browser.confirm(); await browser.generate();

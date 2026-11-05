@@ -47,7 +47,7 @@ async function startStaticServer() {
       const headers = { "Content-Type": asset[1], "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" };
       if (route === "/") {
         headers["Referrer-Policy"] = "strict-origin-when-cross-origin";
-        headers["Content-Security-Policy"] = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; media-src blob:; frame-src https://www.youtube-nocookie.com; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
+        headers["Content-Security-Policy"] = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; media-src blob:; frame-src https://www.youtube-nocookie.com; base-uri 'none'; form-action 'self'; frame-ancestors https://sujanshrestha.ca; object-src 'none'";
       }
       response.writeHead(200, headers).end(body);
     } catch {
@@ -234,7 +234,7 @@ async function newPage(browser, origin, viewport, { invalidSavedTheme = false, r
   const response = await page.goto(origin, { waitUntil: "networkidle" });
   assert.equal(response?.status(), 200);
   assert.equal(response?.headers()["x-content-type-options"], "nosniff");
-  assert.match(response?.headers()["content-security-policy"] || "", /frame-src https:\/\/www\.youtube-nocookie\.com/);
+  assert.equal(response?.headers()["content-security-policy"], "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; media-src blob:; frame-src https://www.youtube-nocookie.com; base-uri 'none'; form-action 'self'; frame-ancestors https://sujanshrestha.ca; object-src 'none'");
   return { context, page, requests, consoleMessages };
 }
 

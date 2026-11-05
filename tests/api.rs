@@ -451,13 +451,17 @@ async fn frontend_assets_are_public_but_api_credentials_remain_protected() {
             .unwrap()
             .starts_with(content_type));
         assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(response.headers()["cache-control"], "no-store");
         if path == "/" {
-            let csp = response.headers()["content-security-policy"]
-                .to_str()
-                .unwrap();
-            assert!(csp.contains("script-src 'self'"));
-            assert!(csp.contains("frame-src https://www.youtube-nocookie.com"));
-            assert!(csp.contains("media-src blob:"));
+            assert_eq!(
+                response.headers()["content-security-policy"],
+                "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; media-src blob:; frame-src https://www.youtube-nocookie.com; base-uri 'none'; form-action 'self'; frame-ancestors https://sujanshrestha.ca; object-src 'none'"
+            );
+            assert_eq!(
+                response.headers()["referrer-policy"],
+                "strict-origin-when-cross-origin"
+            );
+            assert!(!response.headers().contains_key("x-frame-options"));
         }
         let body = to_bytes(response.into_body(), 65536).await.unwrap();
         let text = std::str::from_utf8(&body).unwrap();

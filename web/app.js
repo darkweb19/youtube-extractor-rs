@@ -140,8 +140,11 @@
   };
   const qualities = [["best", "Best available"], ["worst", "Lowest available"], ...[144, 240, 360, 480, 720, 1080, 1440, 2160, 4320, 8640].map((height) => [height + "p", "Up to " + height + "p"])];
   function setOptions(select, options, value) {
-    // The option lists are fixed product values, never user or server input.
-    select.innerHTML = options.map(([key, label]) => `<option value="${key}">${label}</option>`).join("");
+    const nodes = options.map(([key, label]) => {
+      const option = document.createElement("option");
+      option.value = key; option.textContent = label; return option;
+    });
+    select.replaceChildren(...nodes);
     select.value = options.some(([key]) => key === value) ? value : options[0][0];
   }
   function updateMedia() {

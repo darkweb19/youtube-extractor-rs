@@ -117,6 +117,13 @@ input::placeholder { color: var(--ink-faint); opacity: 1; }
 .field-help, .field-error { margin: 7px 0 0; font-size: 12px; line-height: 1.5; }
 .field-help { color: var(--ink-quiet); }
 .field-error { color: var(--danger); }
+.access-status { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 52px; margin: 26px 0 20px; padding: 10px 15px; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--ink-quiet); font-size: 12px; }
+.access-status[data-state="saved"], .access-status[data-state="open"] { color: var(--ink); font-weight: 650; }
+.access-status[data-state="saved"] #session-message::before, .access-status[data-state="open"] #session-message::before { content: "✓"; display: inline-block; margin-right: 9px; color: var(--success); }
+.access-status[data-state="error"] { color: var(--danger); }
+.access-action { flex: 0 0 auto; padding: 5px 0; border: 0; background: transparent; color: var(--ink-quiet); font-size: 11px; font-weight: 650; }
+.access-action:hover:not(:disabled) { color: var(--primary); }
+.access-status:not([hidden]) + .access-settings:not([hidden]) { margin-top: -12px; }
 .access-settings { margin: 26px 0 20px; border: 1px solid var(--border); border-radius: var(--radius-md); }
 .access-settings summary { display: flex; min-height: 52px; align-items: center; justify-content: space-between; gap: 10px; padding: 0 15px; color: var(--ink); cursor: pointer; list-style: none; font-size: 12px; font-weight: 650; }
 .access-settings summary::-webkit-details-marker { display: none; }
@@ -130,6 +137,7 @@ input::placeholder { color: var(--ink-faint); opacity: 1; }
 .token-shell input { height: 42px; }
 .token-toggle { align-self: stretch; padding: 0 13px; border: 0; background: transparent; color: var(--ink-quiet); font-size: 12px; font-weight: 650; }
 .token-toggle:hover { color: var(--primary); }
+.save-access { min-height: 38px; min-width: 112px; margin-top: 13px; font-size: 12px; }
 .primary-button, .download-button, .secondary-button { display: inline-flex; align-items: center; justify-content: center; gap: 12px; min-height: 47px; padding: 0 17px; border: 1px solid transparent; border-radius: var(--radius-sm); font-size: 13px; font-weight: 650; text-decoration: none; transition: background .15s, border-color .15s; }
 .primary-button, .download-button { background: var(--primary); color: var(--on-primary); }
 .primary-button:hover:not(:disabled), .download-button:hover { background: var(--primary-hover); }

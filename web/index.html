@@ -60,13 +60,19 @@
               <p id="bitrate-help" class="field-help">Quality is limited by the available source.</p>
             </div>
 
+            <div class="access-status" id="session-status" role="status" aria-live="polite">
+              <span id="session-message">Checking access…</span>
+              <button id="session-retry-button" class="access-action" type="button" hidden>Check again</button>
+              <button id="forget-access-button" class="access-action" type="button" hidden>Forget this browser</button>
+            </div>
             <details class="access-settings" id="access-settings">
               <summary><span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2" stroke="currentColor" stroke-width="1.6"/><path d="M8 10V7a4 4 0 0 1 8 0v3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg> API access token</span><span class="access-required">REQUIRED <span aria-hidden="true">⌄</span></span></summary>
               <div class="access-body">
                 <label for="api-token" class="field-label">Access token</label>
                 <div class="token-shell"><input id="api-token" type="password" placeholder="Paste your API token" autocomplete="off" spellcheck="false" aria-describedby="token-help token-error"><button id="token-toggle" type="button" class="token-toggle" aria-label="Show access token" aria-pressed="false">Show</button></div>
-                <p id="token-help" class="field-help">Kept in this tab's memory and sent only to this service.</p>
+                <p id="token-help" class="field-help">Save access on this browser so you don't need to enter your token again.</p>
                 <p id="token-error" class="field-error" hidden></p>
+                <button id="save-access-button" class="secondary-button save-access" type="button">Save access</button>
               </div>
             </details>
 

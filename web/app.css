@@ -175,7 +175,8 @@ progress::-webkit-progress-bar { background: var(--border); } progress::-webkit-
 .file-row span { margin-top: 3px; color: var(--ink-quiet); font-size: 11px; }
 .file-row .file-extension { padding: 5px 7px; border: 1px solid var(--border); border-radius: 5px; color: var(--ink-quiet); font: 600 10px var(--font-mono); }
 .download-button { width: 100%; }
-.new-video { display: block; margin: 10px auto 0; }
+.new-video { display: flex; align-items: center; gap: 5px; margin: 10px auto 0; }
+.new-video svg { width: 14px; height: 14px; }
 .error-glyph { display: grid; place-items: center; width: 30px; height: 30px; margin-bottom: 18px; border: 1px solid var(--danger); border-radius: 8px; color: var(--danger); font-weight: 700; }
 .error-state p { overflow-wrap: anywhere; }
 .error-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 9px; margin-top: 20px; }

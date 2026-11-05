@@ -56,7 +56,7 @@ async function until(predicate) {
   }
   assert.fail("Expected browser event was not observed");
 }
-function app(fetcher, { initialStorage = [], storageUnavailable = false, prefersDark = false, narrowScreen = false, reduceMotion = false, generatedIds = [jobId] } = {}) {
+function app(fetcher, { initialStorage = [], storageUnavailable = false, prefersDark = false, narrowScreen = false, reduceMotion = false, generatedIds = [jobId], operatorToken = token, sessionFetcher = (_, options) => options.method === "POST" || options.method === "DELETE" ? response(204) : response(200, { authenticated: true, saved: true }) } = {}) {
   const elements = new Map(), logs = [], requests = [], timers = new Map();
   const storage = new Map(initialStorage);
   const objectUrls = [], revokedUrls = [];
@@ -96,11 +96,14 @@ function app(fetcher, { initialStorage = [], storageUnavailable = false, prefers
       return id;
     },
     clearTimeout(id) { timers.delete(id); },
-    async fetch(path, options) { requests.push({ path, options }); return fetcher(path, options); }
+    async fetch(path, options) {
+      requests.push({ path, options });
+      return path === "/api/v1/session" ? sessionFetcher(path, options) : fetcher(path, options);
+    }
   };
   vm.runInNewContext(source, sandbox, { filename: "app.js" });
   element("api-token").type = "password";
-  element("api-token").value = token; element("youtube-url").value = video;
+  element("api-token").value = operatorToken; element("youtube-url").value = video;
   return {
     element, logs, requests, storage, objectUrls, revokedUrls,
     async confirm() { await element("source-form").emit("submit"); },
@@ -111,6 +114,8 @@ function app(fetcher, { initialStorage = [], storageUnavailable = false, prefers
   };
 }
 function events(browser, event) { return browser.logs.filter((entry) => entry.event === event); }
+function downloadRequests(browser) { return browser.requests.filter(({ path }) => path.startsWith("/api/v1/downloads")); }
+function sessionRequests(browser) { return browser.requests.filter(({ path }) => path === "/api/v1/session"); }
 function assertPrivate(browser, additionalSecrets = []) {
   const serialized = JSON.stringify(browser.logs);
   for (const secret of [token, video, "abcdefghijk", "source-secret", upstreamSecret, "blob:private-object-url", "private-filename.mp4", ...additionalSecrets])
@@ -150,9 +155,9 @@ test("video and audio configuration is confirmed before dispatch and maps to val
       assert.deepEqual(browser.element("output-quality").children.map((option) => option.value), ["best"], "audio exposes only the adapter-supported quality");
     }
     await browser.confirm();
-    assert.equal(browser.requests.length, 0, "reviewing a source must not create extraction work");
+    assert.equal(downloadRequests(browser).length, 0, "reviewing a source must not create extraction work");
     await browser.generate();
-    const submitted = browser.requests.find(({ options }) => options.method === "POST");
+    const submitted = downloadRequests(browser).find(({ options }) => options.method === "POST");
     assert.ok(submitted);
     assert.deepEqual(JSON.parse(submitted.options.body), item.body);
     assert.equal(submitted.options.headers["X-Idempotency-Key"], ids[index]);
@@ -164,7 +169,7 @@ test("invalid audio bitrate is blocked before opening confirmation or creating a
   const browser = app(() => response(500));
   await configure(browser, { type: "audio", format: "mp3", quality: "best", bitrate: 321 });
   await browser.confirm();
-  assert.equal(browser.requests.length, 0);
+  assert.equal(downloadRequests(browser).length, 0);
   assert.equal(browser.element("confirm-dialog").open, false);
   assert.match(browser.element("bitrate-error").textContent, /32 to 320/);
   assert.equal(browser.element("audio-bitrate").getAttribute("aria-invalid"), "true");
@@ -180,7 +185,7 @@ test("logs confirmation, job transitions, transfer and playback without logging 
     return response(200, { status, progress: { stage: status === "running" ? "downloading" : "" }, output: { filename: "private-filename.mp4" }, download_url: `/api/v1/downloads/${jobId}/file` });
   });
   await browser.confirm();
-  assert.equal(browser.requests.length, 0, "Confirmation must not dispatch a download");
+  assert.equal(downloadRequests(browser).length, 0, "Confirmation must not dispatch a download");
   await browser.generate();
   await browser.element("result-video").emit("loadedmetadata");
   await browser.element("result-video").emit("playing");
@@ -190,7 +195,7 @@ test("logs confirmation, job transitions, transfer and playback without logging 
   for (const event of ["source.validated", "confirmation.opened", "access.ready", "confirmation.accepted", "job.submission_started", "job.submitted", "file.transfer_started", "file.transfer_completed", "preview.ready", "preview.metadata_loaded", "preview.playing", "file.download_clicked"])
     assert.equal(events(browser, event).length, 1, event);
   assert.equal(browser.element("stage-pill").textContent, "READY");
-  assert.ok(browser.requests.every(({ options }) => options.headers.Authorization === `Bearer ${token}`));
+  assert.ok(downloadRequests(browser).every(({ options }) => !options.headers.Authorization && options.headers["X-Frame-Client"] === "1" && options.credentials === "same-origin"));
   assert.equal(browser.logs.filter((entry) => entry.level === "error").length, 0);
   const objectUrl = browser.objectUrls[0];
   assert.equal(browser.element("result-video").src, objectUrl);
@@ -215,6 +220,123 @@ test("theme fallback tolerates invalid or unavailable storage and never stores t
   await unavailable.element("theme-toggle").emit("click");
   assert.equal(unavailable.element("html").getAttribute("data-theme"), "light", "theme toggle still works when storage throws");
   assert.equal(unavailable.logs.filter((entry) => entry.level === "error").length, 0);
+});
+
+test("startup reports saved and development access without conflating them", async () => {
+  const saved = app(() => response(500), { operatorToken: "" });
+  await until(() => events(saved, "access.ready").length === 1);
+  assert.equal(saved.element("session-message").textContent, "Access saved");
+  assert.equal(saved.element("forget-access-button").hidden, false);
+  assert.equal(saved.element("api-token").value, "");
+  const initialCheck = sessionRequests(saved)[0];
+  assert.equal(initialCheck.options.method, "GET");
+  assert.equal(initialCheck.options.headers.Authorization, undefined);
+  assert.equal(initialCheck.options.headers["X-Frame-Client"], "1");
+  assert.equal(initialCheck.options.credentials, "same-origin");
+
+  const development = app(() => response(500), {
+    operatorToken: "",
+    sessionFetcher: () => response(200, { authenticated: true, saved: false })
+  });
+  await until(() => events(development, "access.ready").length === 1);
+  assert.equal(development.element("session-message").textContent, "Access ready");
+  assert.equal(development.element("forget-access-button").hidden, true);
+  assert.notEqual(development.element("session-message").textContent, "Access saved");
+});
+
+test("saving requires a bearer once, verifies the cookie without bearer, and clears the field", async () => {
+  let sessionGets = 0;
+  const browser = app(() => response(500), {
+    sessionFetcher: (_, options) => {
+      if (options.method === "POST") return response(204);
+      if (options.method === "GET" && sessionGets++ === 0) return response(401);
+      return response(200, { authenticated: true, saved: true });
+    }
+  });
+  await until(() => events(browser, "request.unauthenticated").length === 1);
+  await browser.element("save-access-button").emit("click");
+  assert.deepEqual(sessionRequests(browser).map(({ options }) => options.method), ["GET", "POST", "GET"]);
+  const [startup, save, verify] = sessionRequests(browser);
+  assert.equal(startup.options.headers.Authorization, undefined);
+  assert.equal(save.options.headers.Authorization, `Bearer ${token}`);
+  assert.equal(save.options.body, undefined, "the session endpoint takes the credential only in Authorization");
+  assert.equal(verify.options.headers.Authorization, undefined);
+  for (const request of [startup, save, verify]) {
+    assert.equal(request.options.headers["X-Frame-Client"], "1");
+    assert.equal(request.options.credentials, "same-origin");
+  }
+  assert.equal(browser.element("session-message").textContent, "Access saved");
+  assert.equal(browser.element("access-settings").hidden, true);
+  assert.equal(browser.element("api-token").value, "");
+  assert.ok(![...browser.storage.values()].includes(token));
+  assertPrivate(browser);
+});
+
+test("blocked cookies cannot produce a false saved state and retain the token for retry", async () => {
+  let sessionGets = 0;
+  const browser = app(() => response(500), {
+    sessionFetcher: (_, options) => {
+      if (options.method === "POST") return response(204);
+      if (options.method === "GET" && sessionGets++ === 0) return response(401);
+      return response(401);
+    }
+  });
+  await until(() => events(browser, "request.unauthenticated").length === 1);
+  await browser.element("save-access-button").emit("click");
+  assert.match(browser.element("token-error").textContent, /allow cookies/i);
+  assert.equal(browser.element("api-token").value, token);
+  assert.notEqual(browser.element("session-message").textContent, "Access saved");
+  assert.equal(browser.element("forget-access-button").hidden, true);
+  assert.equal(downloadRequests(browser).length, 0);
+  assertPrivate(browser);
+});
+
+test("forget sends unauthenticated DELETE and verifies that the saved session is gone", async () => {
+  let deleted = false;
+  const browser = app(() => response(500), {
+    operatorToken: "",
+    sessionFetcher: (_, options) => {
+      if (options.method === "DELETE") { deleted = true; return response(204); }
+      return deleted ? response(401) : response(200, { authenticated: true, saved: true });
+    }
+  });
+  await until(() => events(browser, "access.ready").length === 1);
+  await browser.element("forget-access-button").emit("click");
+  assert.deepEqual(sessionRequests(browser).map(({ options }) => options.method), ["GET", "DELETE", "GET"]);
+  const deletion = sessionRequests(browser)[1];
+  assert.equal(deletion.options.headers.Authorization, undefined);
+  assert.equal(deletion.options.headers["X-Frame-Client"], "1");
+  assert.equal(deletion.options.credentials, "same-origin");
+  assert.equal(browser.element("forget-access-button").hidden, true);
+  assert.equal(browser.element("access-settings").hidden, false);
+  assert.match(browser.element("toast-region").children[0].children[0].textContent, /Access removed/);
+  assertPrivate(browser);
+});
+
+for (const dismissal of ["back-button", "escape"]) test(`dismissing confirmation while access save and verification are pending never submits: ${dismissal}`, async () => {
+  let sessionGets = 0;
+  let releaseSave, releaseVerify;
+  const browser = app(() => response(500), {
+    sessionFetcher: (_, options) => {
+      if (options.method === "POST") return new Promise((resolve) => { releaseSave = resolve; });
+      if (options.method === "GET" && sessionGets++ === 0) return response(401);
+      return new Promise((resolve) => { releaseVerify = resolve; });
+    }
+  });
+  await until(() => events(browser, "request.unauthenticated").length === 1);
+  await browser.confirm();
+  const generation = browser.generate();
+  await until(() => typeof releaseSave === "function");
+  if (dismissal === "back-button") await browser.element("back-button").emit("click");
+  else browser.element("confirm-dialog").close();
+  releaseSave(response(204));
+  await until(() => typeof releaseVerify === "function");
+  releaseVerify(response(200, { authenticated: true, saved: true }));
+  await generation;
+  assert.equal(browser.element("confirm-dialog").open, false);
+  assert.equal(downloadRequests(browser).some(({ options }) => options.method === "POST"), false);
+  assert.deepEqual(sessionRequests(browser).map(({ options }) => options.method), ["GET", "POST", "GET"]);
+  assertPrivate(browser);
 });
 
 test("terminal failed job is an error even when its poll returned HTTP 200", async () => {
@@ -255,7 +377,7 @@ test("network errors omit the raw fetch error and its private URL", async () => 
 test("request timeout is distinct from user cancellation", async () => {
   const browser = app((_, options) => pending(options.signal));
   await browser.confirm(); const generation = browser.generate();
-  await until(() => events(browser, "request.started").length === 1);
+  await until(() => events(browser, "request.started").some((event) => event.method === "POST" && event.route === "/api/v1/downloads"));
   browser.fireTimeout(30000); await generation;
   const error = events(browser, "request.failed")[0];
   assert.equal(error.error_kind, "timeout"); assert.equal(error.error_code, "TIMEOUT");
@@ -278,7 +400,7 @@ test("cancel aborts the pending poll and logs its captured job without producing
     return pending(options.signal);
   });
   await browser.confirm(); const generation = browser.generate();
-  await until(() => browser.requests.length === 2);
+  await until(() => downloadRequests(browser).length === 2);
   await browser.element("cancel-button").emit("click"); await generation;
   assert.equal(events(browser, "request.aborted")[0].job_id, jobId);
   assert.equal(events(browser, "cancel.confirmed")[0].job_id, jobId);
@@ -292,7 +414,7 @@ test("invalid input and unknown upstream fields cannot be copied into console", 
   browser.element("youtube-url").value = "https://private.invalid/" + token;
   await browser.confirm();
   assert.equal(events(browser, "source.validation_failed").length, 1);
-  assert.equal(browser.requests.length, 0);
+  assert.equal(downloadRequests(browser).length, 0);
   browser.element("youtube-url").value = video; await browser.confirm(); await browser.generate();
   assert.ok(browser.element("error-description").textContent.includes("valid job ID"));
   assertPrivate(browser);
@@ -319,7 +441,7 @@ test("a cancelled generation ignores a late completed poll response", async () =
   });
   await browser.confirm();
   const generation = browser.generate();
-  await until(() => browser.requests.length === 2);
+  await until(() => downloadRequests(browser).length === 2);
   await browser.element("cancel-button").emit("click");
   assert.equal(browser.element("stage-pill").textContent, "WAITING");
   finishPoll();
@@ -349,8 +471,7 @@ for (const [caseName, maliciousUrl] of [
   assertPrivate(browser);
 });
 
-test("an uncertain POST can be looked up by its idempotency UUID using refreshed credentials", async () => {
-  const refreshedToken = "refreshed-private-api-token-012345678901";
+test("an uncertain POST can be looked up by its idempotency UUID through saved access", async () => {
   const browser = app((path, options) => {
     if (options.method === "POST") return response(500, { error: { code: "INTERNAL", message: "The response was interrupted." } });
     if (path === `/api/v1/downloads/${jobId}`) return response(200, {
@@ -360,33 +481,46 @@ test("an uncertain POST can be looked up by its idempotency UUID using refreshed
     return response(200);
   });
   await browser.confirm(); await browser.generate();
-  const post = browser.requests[0];
+  const post = downloadRequests(browser)[0];
   assert.equal(post.options.method, "POST");
   assert.equal(post.options.headers["X-Idempotency-Key"], jobId);
+  assert.equal(post.options.headers.Authorization, undefined);
   assert.equal(browser.element("check-job-button").hidden, false);
   assert.equal(browser.element("job-id").textContent.includes(jobId), true);
 
-  browser.element("api-token").value = refreshedToken;
   await browser.element("check-job-button").emit("click");
-  assert.deepEqual(browser.requests.map(({ options }) => options.method), ["POST", "GET", "GET"]);
-  assert.ok(browser.requests.slice(1).every(({ options }) => options.headers.Authorization === `Bearer ${refreshedToken}`));
+  assert.deepEqual(downloadRequests(browser).map(({ options }) => options.method), ["POST", "GET", "GET"]);
+  assert.ok(downloadRequests(browser).every(({ options }) => options.headers.Authorization === undefined && options.credentials === "same-origin"));
   assert.equal(browser.element("stage-pill").textContent, "READY");
-  assert.ok(![...browser.storage.values()].includes(refreshedToken));
-  assertPrivate(browser, [refreshedToken]);
+  assertPrivate(browser);
 });
 
-test("recovery cancellation refreshes auth and sends DELETE for the retained idempotency UUID", async () => {
+test("a 401 recovery saves the replacement token, preserves the job and uses cookie auth for cancellation", async () => {
   const refreshedToken = "second-private-api-token-012345678901234";
-  const browser = app((_, options) => options.method === "POST"
-    ? response(503, { error: { code: "QUEUE_FULL", message: "Admission could not be confirmed." } })
-    : response(204));
+  let polls = 0;
+  const browser = app((path, options) => {
+    if (options.method === "POST") return response(202, { job_id: jobId });
+    if (options.method === "DELETE") return response(204);
+    if (path === `/api/v1/downloads/${jobId}` && polls++ === 0) return response(401, { error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
+    return response(200, { job_id: jobId, status: "queued" });
+  });
   await browser.confirm(); await browser.generate();
   assert.equal(browser.element("cancel-recovery-button").hidden, false);
+  assert.equal(browser.element("job-id").textContent.includes(jobId), true);
   browser.element("api-token").value = refreshedToken;
+  await browser.element("save-access-button").emit("click");
+  const save = sessionRequests(browser).find(({ options }) => options.method === "POST");
+  assert.equal(save.options.headers.Authorization, `Bearer ${refreshedToken}`);
+  assert.equal(save.options.body, undefined);
+  const verified = sessionRequests(browser).filter(({ options }) => options.method === "GET").at(-1);
+  assert.equal(verified.options.headers.Authorization, undefined);
+  assert.equal(browser.element("api-token").value, "", "verified saved access clears the replacement token field");
+  assert.equal(browser.element("job-id").textContent.includes(jobId), true);
   await browser.element("cancel-recovery-button").emit("click");
-  assert.deepEqual(browser.requests.map(({ options }) => options.method), ["POST", "DELETE"]);
-  assert.equal(browser.requests[1].path, `/api/v1/downloads/${jobId}`);
-  assert.equal(browser.requests[1].options.headers.Authorization, `Bearer ${refreshedToken}`);
+  assert.deepEqual(downloadRequests(browser).map(({ options }) => options.method), ["POST", "GET", "DELETE"]);
+  assert.equal(downloadRequests(browser)[2].path, `/api/v1/downloads/${jobId}`);
+  assert.equal(downloadRequests(browser)[2].options.headers.Authorization, undefined);
+  assert.equal(downloadRequests(browser)[2].options.credentials, "same-origin");
   assert.equal(browser.element("stage-pill").textContent, "WAITING");
   assertPrivate(browser, [refreshedToken]);
 });
@@ -395,8 +529,8 @@ test("a POST response with a different UUID is never trusted as the job identity
   const wrongId = "cccccccc-dddd-eeee-ffff-000000000000";
   const browser = app(() => response(202, { job_id: wrongId }));
   await browser.confirm(); await browser.generate();
-  assert.equal(browser.requests.length, 1);
-  assert.equal(browser.requests[0].options.headers["X-Idempotency-Key"], jobId);
+  assert.equal(downloadRequests(browser).length, 1);
+  assert.equal(downloadRequests(browser)[0].options.headers["X-Idempotency-Key"], jobId);
   assert.ok(browser.element("error-description").textContent.includes("valid job ID"));
   assert.ok(browser.element("job-id").textContent.includes(jobId));
   assert.ok(!browser.element("job-id").textContent.includes(wrongId));
@@ -410,7 +544,7 @@ test("a poll response with a different UUID is rejected and retains only the req
     ? response(202, { job_id: jobId })
     : response(200, { job_id: wrongId, status: "queued" }));
   await browser.confirm(); await browser.generate();
-  assert.equal(browser.requests.length, 2);
+  assert.equal(downloadRequests(browser).length, 2);
   assert.equal(events(browser, "workflow.failed")[0]?.error_kind, "protocol");
   assert.ok(browser.element("job-id").textContent.includes(jobId));
   assert.ok(!browser.element("job-id").textContent.includes(wrongId));

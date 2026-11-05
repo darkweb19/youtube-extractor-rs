@@ -1,50 +1,92 @@
-# Frame — UI Design Context
+---
+version: alpha
+name: Frame
+description: A precise, quiet editing workspace for authenticated YouTube extraction.
+colors:
+  primary: "#5558d9"
+  background: "#f7f8fa"
+  surface: "#ffffff"
+  text: "#191b22"
+  muted: "#626570"
+  dark-primary: "#a5a7ff"
+  dark-background: "#111216"
+  dark-surface: "#191a20"
+  dark-text: "#f1f2f5"
+  dark-muted: "#a3a6b2"
+typography:
+  display:
+    fontFamily: '"Avenir Next", system-ui, -apple-system, "Segoe UI", sans-serif'
+  body:
+    fontFamily: 'system-ui, -apple-system, "Segoe UI", sans-serif'
+  mono:
+    fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace'
+rounded:
+  sm: "8px"
+  md: "12px"
+  lg: "16px"
+spacing:
+  unit: "4px"
+  page-max: "1120px"
+components:
+  button:
+    description: Solid primary, outlined secondary, and quiet utility actions.
+  field:
+    description: Labeled native inputs and selects with persistent inline validation.
+  dialog:
+    description: Native modal source confirmation with a reserved 16:9 preview.
+---
 
-## Product and audience
-Frame is the single-operator browser interface of the standalone Rust YouTube extractor service. Its job is to help an authorized operator confirm a video before spending extraction resources, then produce a locally downloadable MP4. This is a *product tool*, not a public streaming or media-discovery site.
+# Frame design system
 
-## North star
-A lightweight video edit-bay console: precise labels, a two-step approval handoff, and a clear finished-file surface. The signature is a **video confirmation gate** between input and extraction—preview is deliberately separate from generation.
+## Overview
 
-Avoid dashboard clutter, false download progress, dark neon themes, gradients-for-decoration, and media thumbnails without a real source.
+Frame is a single-operator extraction tool, not a media catalog. An authorized operator identifies a YouTube source, confirms it, chooses an output, and follows a bounded server job to a locally downloadable file. Product facts come from [API v1](docs/api.md), [the route implementation](src/api.rs), [request validation](src/model.rs), and [the contributor invariants](AGENTS.md).
 
-## Design tokens
-The canonical token values live in `web/app.css` under `:root`; this document mirrors their semantic roles and rationale. Changes to durable tokens should update both.
+The north star is a quiet video edit bay: one source, explicit output settings, and a dependable render surface. The visual signature is the four-corner frame used in the mark and empty media surface. The ordered source/configuration/export trail represents real workflow state. The user requested a complete rebrand toward the precision and spacing of premium productivity software; this replaces the former blue/coral identity.
 
-| CSS token | Current value | Role |
-| --- | --- | --- |
-| `--paper` | `#f4f7fd` | Canvas / cool editing desk |
-| `--surface` | `#fff` | Foreground workspace |
-| `--ink` | `#162347` | Headings, labels, primary text |
-| `--ink-quiet` | `#67738f` | Supporting information |
-| `--blue` | `#3459de` | Primary actions, focus hierarchy |
-| `--blue-strong` | `#264bc8` | Primary hover state |
-| `--blue-wash` | `#edf2ff` | Activity and index markers |
-| `--border` | `#dfe5f1` | Surface separation |
-| `--coral` | `#ff846e` | Small editorial accent only |
-| `--success` | `#157a5b` | Completed file feedback |
-| `--danger` | `#c13e50` | Failures and interruptions |
+The interface is English and globally usable. No country-specific business behavior is inferred. Desktop operators and narrow mobile screens receive the same workflow. No research interviews or usability sessions are claimed; operator needs are inferred from the current API and task.
 
-Use the display stack `Trebuchet MS / Avenir Next / Segoe UI` for compact, emphatic headings; `Segoe UI / Helvetica Neue / Arial` for UI text; system monospace for metadata and stage labels. No externally loaded fonts or runtime image assets.
+## Colors
+
+Neutral zinc surfaces carry hierarchy. Periwinkle is reserved for primary actions, selected states, and keyboard focus. Green means completed work; red means an actionable failure. Labels accompany all semantic colors. Light and dark themes change surfaces and contrast, not placement or meaning. Forced colors defer to system colors.
+
+Canonical runtime values live in `web/app.css`; this file mirrors their accepted meaning (ownership model B). CSS custom properties feed every shared control and state. No independent theme package or generated adapter exists. When tokens change, reconcile these frontmatter values and inspect rendered contrast in both themes in the same branch.
+
+## Typography
+
+Use the locally available Avenir Next/system display stack sparingly for the page heading and brand. System UI text keeps forms familiar and avoids network font shifts. Monospace is reserved for workflow indices, job identifiers, and compact file details. Body copy uses sentence case, approximately 1.5 line height, and short measures. Inputs remain legible on mobile. All families have system fallbacks; no remote font requests are required.
 
 ## Layout
-- Above 860px, show source entry and output as a two-column workspace on a soft canvas.
-- At 860px and below, stack entry and output with natural document scrolling.
-- At narrow widths, let the confirmation dialog fill most of the viewport while preserving a visible close/back action.
-- Preserve the output panel's footprint across idle, working, completed, and error states. The modal's 16:9 embed owns its aspect ratio.
 
-## Interaction behavior
-- Source form accepts recognized YouTube link formats and sanitizes to a canonical watch URL.
-- The first **Generate MP4** click opens a native modal YouTube embed. Only **Continue to generate** creates a backend job.
-- The API token is entered explicitly by the trusted operator. Never bundle it in static files or save it to persistent web storage.
-- Job execution is pessimistic and server-confirmed: queued/running are not success. Percentage appears only when the backend supplies real numeric progress.
-- Errors appear in a transient toast *and* a persistent output panel. Do not dismiss an actionable failure without a way to retry.
-- On success, reuse one authenticated fetched Blob for in-page video playback and explicit MP4 download; revoke old object URLs.
-- All interactive controls support keyboard focus, hover, visible disabled states, and mobile touch. Confirmation uses native `<dialog>` semantics.
-- Motion is subtle and honors `prefers-reduced-motion`. Scrollbars remain visible and use the shared tokenized baseline.
+Use a compact header and a centered workspace at a maximum of 1120px. The URL field is the first prominent interaction. On wide screens, source and configuration sit beside the output surface; narrow screens stack them with natural document scrolling. The input and output are workflow peers, not dashboard widgets. Keep output space available across empty, processing, success, and error states.
 
-## Verification and limitations
-- Backend route/HTML/CSS/JS availability, security headers, and existing API authorization are covered in `tests/api.rs`.
-- GitHub CI validates `web/app.js` syntax with Node and runs the Rust test suite/container smoke tests.
-- Real browser interaction and actual YouTube media extraction on Railway require deployment verification; CI fixtures are not evidence of upstream accessibility.
-- Blob playback is a simple first version for one authorized operator, not a memory-efficient media-streaming solution for very large files.
+The spacing rhythm is 4px with larger 16/24/32px groupings. Reserve media aspect ratios and button dimensions during busy states. Dialog content scrolls within the viewport, with close and back actions reachable. Long filenames, URLs, and UUIDs wrap without horizontal document overflow.
+
+## Elevation & Depth
+
+Use quiet one-pixel borders and small shadows where a surface separates from the canvas. Modal elevation is stronger than card elevation. Dark mode uses tonal separation. Do not introduce decorative gradients, backdrop blur, glass surfaces, floating ornaments, or persistent animation.
+
+## Shapes
+
+Controls use restrained 8px corners, grouped surfaces 12px, and major panels 16px. Frame corners provide the single memorable geometry. Small status badges may be pills. Icons use a consistent outline stroke; keep text on actions whose icon is ambiguous.
+
+## Components
+
+`web/app.css` owns shared button, field, panel, status, scrollbar, toast, and dialog styles. `web/app.js` owns their behavior. [UX-CONTRACT.md](UX-CONTRACT.md) maps the canonical owners and lifecycle.
+
+Buttons have hover, pressed, focus-visible, disabled, and busy states. Solid primary actions advance the task; outlined and quiet actions go back or recover. Cancellation is distinct from the primary action. Success follows server-confirmed completion and authenticated file transfer.
+
+Native HTML selects are intentional: the platform owns popup geometry and keyboard interaction. The product owns trigger styling, labels, values, and validation. Forms use app-owned inline validation with `novalidate`, field associations, and first-error focus. Tokens are masked by default with an accessible show/hide control. Confirmation uses native `<dialog>` focus isolation and Escape behavior.
+
+Progress is numeric only when the server supplies a finite percentage. Otherwise use an indeterminate activity treatment and a specific stage label. Do not invent intermediate progress. All output, error, and processing views share a stable surface and truthful status text.
+
+Transitions are short (roughly 150–180ms), restricted to interaction feedback. Respect reduced motion. Scrollbars remain visible and inherit global thumb, track, hover, active, and forced-color rules.
+
+## Do's and Don'ts
+
+- Do keep one clear next action and preserve entered configuration after recoverable failure.
+- Do make job identity and retry/recheck actions available when a response is uncertain.
+- Do keep the token in tab memory and fetch files with same-origin bearer authentication.
+- Don't treat queue admission as successful extraction, promise availability, or fake media metadata.
+- Don't add frameworks, decorative imagery, external assets, or redundant dashboard furniture.
+- Don't let theme changes alter workflow or reduce keyboard access.

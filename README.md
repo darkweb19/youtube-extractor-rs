@@ -2,7 +2,7 @@
 
 A small Rust service for getting YouTube video information and downloading audio or
 video. It includes an authenticated HTTP API and **Frame**, a browser interface for
-creating MP4 downloads. Downloads run in the background, so clients can check their
+configuring video and audio exports. Downloads run in the background, so clients can check their
 progress and collect the finished file when it is ready.
 
 Rust and Axum handle the API, jobs and storage. **yt-dlp** handles extraction, and
@@ -35,7 +35,7 @@ cargo run --locked
 
 The service does not load `.env` automatically. The local environment above lives
 under ignored `work/`; keep `.env` out of commits. Open `http://localhost:8080/` and enter the same `API_TOKEN` under
-**Private API access**.
+**API access token**.
 
 `YTDLP_JS_RUNTIME` defaults to `deno` in the application. Set it to `node` when using
 Node, including when running the root Docker image. The GCP setup installs Deno
@@ -43,16 +43,23 @@ and uses `YTDLP_JS_RUNTIME=deno`.
 
 ### Using the browser
 
-Paste a YouTube link and select **Generate MP4**. A confirmation dialog opens a
-YouTube preview; extraction starts only when you choose **Continue to generate**.
-The page then follows the job, shows errors or progress, and offers playback and
-**Download MP4** once the file is ready. You can cancel work while it is queued or
-running.
+Paste a YouTube link, choose video or audio, and set the format and quality.
+Select **Review source** to open the YouTube confirmation preview. Extraction
+starts only when you choose **Start export**. MP4 is the default; WebM, original
+video, MP3, M4A, and original audio use the existing API options. Video resolution
+settings are ceilings; available sources determine the result. Audio also allows
+an optional bitrate from 32 to 320 kbps.
+
+Frame follows the accepted job, displays honest progress, and offers a preview
+and file download after completion. Cancel queued or running work directly. If a
+network error interrupts status checks or cancellation, use **Check job** or
+**Cancel job** for the existing job. Light and dark themes share the same layout;
+only the theme preference is saved between visits.
 
 The token stays in the current tab's memory. It is not stored in local storage or
 sent to YouTube. This is a trusted operator interface: anyone with the shared token
 can access all jobs and files. Use HTTPS for hosted access. Completed preview loads
-the MP4 into a browser Blob, so large files also need room in browser memory.
+the file into a browser Blob, so large files also need room in browser memory.
 
 ## API
 

@@ -1,0 +1,17 @@
+{
+  "profile": "product-admin",
+  "sourceRoots": ["web"],
+  "locale": "en",
+  "canonicalMap": "UX-CONTRACT.md",
+  "requiredCapabilities": ["Select/Listbox", "Form", "Scrollbar", "Toast", "CRUD"],
+  "ownership": { "Select/Listbox": "native" },
+  "requiredCommands": ["syntax", "unit", "browser"],
+  "commands": {
+    "syntax": "node --check web/app.js",
+    "unit": "node --test tests/frontend/*.test.mjs",
+    "browser": "node tests/frontend/browser.mjs"
+  },
+  "evidence": {
+    "failurePaths": "tests/frontend/diagnostics.test.mjs"
+  }
+}

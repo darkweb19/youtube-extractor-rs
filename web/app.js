@@ -1,6 +1,22 @@
 (() => {
   "use strict";
   const $ = (id) => document.getElementById(id);
+  // Only the display preference is persisted. Access credentials stay in memory.
+  const themeButton = $("theme-toggle");
+  let theme = "light";
+  try { theme = window.localStorage?.getItem("frame-theme") || ""; } catch { theme = ""; }
+  if (!["light", "dark"].includes(theme))
+    theme = window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  function applyTheme(value) {
+    theme = value;
+    document.documentElement?.setAttribute("data-theme", value);
+    themeButton.setAttribute("aria-label", value === "dark" ? "Switch to light theme" : "Switch to dark theme");
+  }
+  applyTheme(theme);
+  themeButton.addEventListener("click", () => {
+    applyTheme(theme === "dark" ? "light" : "dark");
+    try { window.localStorage?.setItem("frame-theme", theme); } catch { /* preference is optional */ }
+  });
   const ui = {
     form: $("source-form"), url: $("youtube-url"), token: $("api-token"),
     access: $("access-settings"), button: $("preview-button"),
@@ -292,6 +308,13 @@
     diagnostic("info", "workflow.reset");
     state.run += 1; state.jobId = null; discardPreview(); step("idle"); mode("idle"); ui.url.focus();
   }
+  $("token-toggle").addEventListener("click", () => {
+    const visible = ui.token.type === "password";
+    ui.token.type = visible ? "text" : "password";
+    $("token-toggle").textContent = visible ? "Hide" : "Show";
+    $("token-toggle").setAttribute("aria-label", visible ? "Hide access token" : "Show access token");
+    $("token-toggle").setAttribute("aria-pressed", String(visible));
+  });
   ui.form.addEventListener("submit", (event) => {
     event.preventDefault(); if (state.busy) return;
     diagnostic("info", "source.validation_started", {}, preparationContext());

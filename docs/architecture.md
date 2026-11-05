@@ -21,7 +21,7 @@ verification, and the [worker guide](../gcp-worker/README.md) for bundle install
 
 ```mermaid
 flowchart LR
-  User[Trusted browser or API client] -->|HTTPS and public API bearer| Railway[Railway: Axum and JobManager]
+  User[Trusted browser or API client] -->|HTTPS and API bearer or browser session| Railway[Railway: Axum and JobManager]
   Railway --> Disk[(Railway persistent DATA_DIR)]
   Railway -->|HTTPS: X-Controller-Token| Controller[Separately deployed Cloud Run controller]
   Controller -->|Attached service identity: get/start/stop| VM[One Compute Engine VM]
@@ -64,7 +64,8 @@ production yt-dlp egress relies on its configured proxy and infrastructure polic
 ## Identity and trust boundaries
 
 The service is a trusted single-operator tool. Its shared public `API_TOKEN`
-grants access to all jobs and files; the browser keeps it in tab memory. There
+grants access to all jobs and files. The browser exchanges it for an opaque,
+signed HttpOnly session cookie; see [browser access](browser-access.md). There
 is no tenant ownership boundary between holders of that token. Keep these
 credentials distinct:
 

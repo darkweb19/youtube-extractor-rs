@@ -16,8 +16,9 @@ change that makes correctness clear. T3 Code's tooling does not apply here.
 
 - **Stable contracts.** Keep bearer authentication, v1 response shapes, UUID job
   identity, polling, cancellation and authenticated files working in both modes.
-  The browser holds the shared token only in tab memory: this is a trusted
-  operator tool, not an anonymous downloader.
+  The browser exchanges a user-entered token for a persistent HttpOnly, Secure
+  session cookie. Raw tokens stay transient; this remains a trusted operator
+  tool, not an anonymous downloader.
 - **Bounded work.** Queue admission, workers, storage reservations, byte limits,
   deadlines and cleanup are correctness requirements. Complete a job only after
   its output is safely published on the serving instance.
@@ -127,9 +128,13 @@ in `src/model.rs`, and error codes/status mapping are in `src/error.rs`.
 | `GET /api/v1/downloads/{id}/file` | Completed output streamed under the same bearer authentication |
 | `DELETE /api/v1/downloads/{id}` | Idempotent cancellation/deletion, `204`; clients stop polling |
 | `GET /api/v1/internal/activity` | Authenticated `{busy, boot_id}` for remote ownership/idle decisions |
+| `GET/POST/DELETE /api/v1/session` | Check saved access, exchange an explicit bearer token for a browser cookie, or forget browser access |
 
-Every v1 route, including internal activity, uses the shared bearer token, rate
-limit and request gate. There is no per-user ownership. JSON bodies are limited
+Protected v1 routes, including internal activity, accept the shared bearer
+token or a valid browser session and retain the rate limit and request gate.
+Cookie requests require `X-Frame-Client: 1` and reject cross-site use; bearer
+clients keep their existing contract. Session creation requires an explicit
+bearer token. Cookie deletion requires the browser header but no valid session. There is no per-user ownership. JSON bodies are limited
 to 16 KiB. Info and download requests reject unknown fields. Download creation
 requires `url`, `type` and `format`; optional fields are `quality` and
 `audio_bitrate_kbps`. Accept only the normalized URL forms in
@@ -146,15 +151,20 @@ applies only to audio jobs.
 and `download_url`. Preserve nullable progress totals/percentages. `202` only
 confirms admission; a status GET may return `200` with a failed job and
 structured error. Completion requires local publication. Relative file URLs need
-bearer auth; never serialize upstream signed URLs, signature ciphers or internal
+bearer or browser-session auth; never serialize upstream signed URLs, signature ciphers or internal
 paths.
 
 The UI is called **Frame**. Read `DESIGN.md` before UI work. Preserve the
-two-step confirmation gate, in-memory token, same-origin authenticated requests,
+two-step confirmation gate, saved browser access, same-origin authenticated requests,
 honest progress, cancellation, persistent error feedback and keyboard access.
 Playback uses an authenticated fetched Blob; revoke old object URLs. Do not
 promise low-memory streaming or anonymous public access. Preserve CSP and other
-response security headers when changing embedded assets.
+response security headers when changing embedded assets. The raw token must
+not enter persistent JavaScript storage or JavaScript-readable cookies. Session
+cookies are opaque, HMAC-signed, HttpOnly, Secure, SameSite=Strict, host-only,
+and scoped to `/api`; they expire after one year and are invalidated by API
+token rotation. Keep startup restoration, expired-session re-entry, and
+**Forget this browser** working. See `docs/browser-access.md`.
 
 ## Separate remote control, ingress and egress
 

@@ -56,18 +56,27 @@ Frame follows the accepted job, displays honest progress, and offers a preview
 and file download after completion. Cancel queued or running work directly. If a
 network error interrupts status checks or cancellation, use **Check job** or
 **Cancel job** for the existing job. Light and dark themes share the same layout;
-only the theme preference is saved between visits.
+the display preference and saved browser access are retained between visits.
 
-The token stays in the current tab's memory. It is not stored in local storage or
-sent to YouTube. This is a trusted operator interface: anyone with the shared token
-can access all jobs and files. Use HTTPS for hosted access. Completed preview loads
-the file into a browser Blob, so large files also need room in browser memory.
+Enter the token once under **API access token** and select **Save access**.
+Frame remembers this browser in a Secure, HttpOnly cookie and automatically
+restores access on later visits. The token field stays hidden while saved access
+is valid. Use **Forget this browser** to clear it. The cookie lasts up to one year;
+clearing cookies, expiry, or rotating the server token requires entering it again.
+
+The raw token is not saved in local storage or a JavaScript-readable cookie,
+and is never sent to YouTube. This is a trusted operator interface: anyone with
+the shared credential can access all jobs and files. Use HTTPS for hosted access.
+Completed preview loads the file into a browser Blob, so large files also need
+room in browser memory.
 
 ## API
 
-All `/api/v1` routes require `Authorization: Bearer <API_TOKEN>`. `/health` and the
-browser assets (`/`, `/app.css`, `/app.js`) are public. File links require the
-token too; they are not public share links.
+Protected `/api/v1` routes accept `Authorization: Bearer <API_TOKEN>` or the
+saved browser session. `/health` and browser assets (`/`, `/app.css`, `/app.js`)
+are public. File links still require authentication; they are not public share
+links. `/api/v1/session` checks, creates, or clears saved browser access; see
+[the session contract](docs/api.md#saved-browser-access).
 
 | Method | Endpoint | What it does |
 | --- | --- | --- |

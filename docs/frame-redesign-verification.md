@@ -1,5 +1,9 @@
 # Frame redesign verification
 
+This report records the initial redesign before saved browser access was added.
+The later session-cookie contract and its validation are documented in
+[browser access](browser-access.md).
+
 Verified locally on 2026-11-05 with Rust 1.99.1, Node.js 24, system Chromium,
 Playwright as test tooling, and FFmpeg/ffprobe. The application remains embedded
 vanilla HTML/CSS/JavaScript served by the existing Rust/Axum backend. No runtime

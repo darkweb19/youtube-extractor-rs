@@ -101,7 +101,7 @@ Controls use restrained 8px corners, grouped surfaces 12px, and major panels 16p
 
 Buttons have hover, pressed, focus-visible, disabled, and busy states. Solid primary actions advance the task; outlined and quiet actions go back or recover. Cancellation is distinct from the primary action. Success follows server-confirmed completion and authenticated file transfer.
 
-Native HTML selects are intentional: the platform owns popup geometry and keyboard interaction. The product owns trigger styling, labels, values, and validation. Forms use app-owned inline validation with `novalidate`, field associations, and first-error focus. Tokens are masked by default with an accessible show/hide control. Confirmation uses native `<dialog>` focus isolation and Escape behavior.
+Native HTML selects are intentional: the platform owns popup geometry and keyboard interaction. The product owns trigger styling, labels, values, and validation. Forms use app-owned inline validation with `novalidate`, field associations, and first-error focus. Tokens are masked by default with an accessible show/hide control. Saved access replaces the entry field with a compact confirmation and Forget this browser action; checking and error states retain access to the current workflow. Confirmation uses native `<dialog>` focus isolation and Escape behavior.
 
 Progress is numeric only when the server supplies a finite percentage. Otherwise use an indeterminate activity treatment and a specific stage label. Do not invent intermediate progress. All output, error, and processing views share a stable surface and truthful status text.
 
@@ -111,7 +111,7 @@ Transitions are short (roughly 150–180ms), restricted to interaction feedback.
 
 - Do keep one clear next action and preserve entered configuration after recoverable failure.
 - Do make job identity and retry/recheck actions available when a response is uncertain.
-- Do keep the token in tab memory and fetch files with same-origin bearer authentication.
+- Do restore saved browser access quietly, hide token entry while valid, and fetch files with same-origin authentication. Persist only the server-issued HttpOnly cookie; never persist the raw token in JavaScript storage.
 - Don't treat queue admission as successful extraction, promise availability, or fake media metadata.
 - Don't add frameworks, decorative imagery, external assets, or redundant dashboard furniture.
 - Don't let theme changes alter workflow or reduce keyboard access.

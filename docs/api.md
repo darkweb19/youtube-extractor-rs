@@ -1,8 +1,18 @@
 # HTTP API v1
 
-All versioned endpoints use `Authorization: Bearer <API_TOKEN>`. The token is a shared service credential; this release does not provide per-user ownership or multi-tenant authorization. Keep it private and terminate public connections with TLS. The bundled single-operator web UI accepts the token directly in the browser and sends it only to same-origin API endpoints in Authorization headers, retaining it in memory for that tab. Do not use the shared-token UI for anonymous public access; use HTTPS and additional ingress access controls where appropriate. Signed media source URLs and internal paths are not part of the client API.
+API clients continue to use `Authorization: Bearer <API_TOKEN>`. Frame also supports an authenticated browser session cookie. The token is a shared service credential; this release does not provide per-user ownership or multi-tenant authorization. Keep it private and terminate public connections with TLS. The bundled single-operator UI exchanges a user-entered token for an opaque, signed HttpOnly cookie through the same-origin session endpoint; it never persists the raw token in browser storage. Cookie-authenticated requests use `X-Frame-Client: 1` and same-origin credentials. Do not use the shared-token UI for anonymous public access; use HTTPS and additional ingress access controls where appropriate. Signed media source URLs and internal paths are not part of the client API.
 
 `GET /health` is public and reports readiness. A successful response establishes that the local service prerequisites work; it does not contact YouTube or establish outbound compatibility. An unavailable local storage directory or FFmpeg returns `503`.
+
+## Saved browser access
+
+- `GET /api/v1/session` returns `200` with `{"authenticated":true,"saved":true}` for a valid saved browser cookie. Explicit bearer authentication or unauthenticated development mode returns `saved:false`; missing/invalid credentials return `401` on an authenticated service.
+- `POST /api/v1/session` requires an explicit valid bearer token and `X-Frame-Client: 1`. It returns `204` and sets `__Secure-frame_session`; the token is not returned or stored verbatim. No request body is needed.
+- `DELETE /api/v1/session` requires `X-Frame-Client: 1` and returns `204` with an expired cookie. It can clear expired/invalid browser access without requiring the old token. It does not cancel jobs or revoke other browsers.
+
+The cookie is host-only with `Path=/api`, `HttpOnly`, `Secure`, `SameSite=Strict`, and a one-year lifetime verified by its signature. API token rotation invalidates all existing browser sessions; ordinary process restarts retain them. Cookies are accepted only with the browser custom header and same-origin request protections; there is no credentialed cross-origin API. An explicitly supplied invalid Authorization header cannot fall back to a valid cookie. Session responses are non-cacheable. Hosted browser access requires HTTPS; Secure cookies are also supported by modern browsers on loopback during local development.
+
+See [browser access](browser-access.md) for the security boundary and recovery behavior.
 
 ## Metadata
 
@@ -41,7 +51,7 @@ Audio requests use `"type":"audio"` and `"format":"original"`, `"m4a"` or `"mp3"
 
 `output`, `error`, total size, percentage and download URL depend on state and availability. The examples illustrate schema, not verified media sizes or identifiers. Clients should tolerate additional response fields.
 
-`GET /api/v1/downloads/{job_id}/file` streams a completed local file and requires the same bearer token. `download_url` is a relative authenticated route, not a public signed URL. Wait for `completed` before requesting bytes. Files are retained only for the configured TTL.
+`GET /api/v1/downloads/{job_id}/file` streams a completed local file and requires a valid bearer token or browser session. `download_url` is a relative authenticated route, not a public signed URL. Wait for `completed` before requesting bytes. Files are retained only for the configured TTL.
 
 `DELETE /api/v1/downloads/{job_id}` requests cancellation and removes local job resources. It returns `204`; deleting an absent job is idempotent. Cancellation can race with an already completing job. Clients must stop polling after deletion.
 
@@ -56,7 +66,7 @@ Errors use JSON with a stable code and a safe message:
 | HTTP | Codes and meaning |
 | --- | --- |
 | `400` | `INVALID_REQUEST`: malformed or unsupported input |
-| `401` | `UNAUTHORIZED`: missing or invalid bearer token |
+| `401` | `UNAUTHORIZED`: missing or invalid bearer token/browser session |
 | `403` | `ACCESS_RESTRICTED`: upstream sign-in/challenge/access restriction |
 | `404` | `NOT_FOUND`: job or output is absent |
 | `409` | `CANCELLED`: operation cannot proceed in this state |

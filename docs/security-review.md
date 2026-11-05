@@ -1,5 +1,12 @@
 # Adversarial review
 
+> **Saved browser access update (2026-11-05):** Frame now exchanges an explicitly
+> entered bearer token for an opaque, signed HttpOnly/Secure session cookie.
+> Existing bearer clients are unchanged. Cookie authentication requires the
+> same-origin browser header; forgetting access only clears the browser cookie.
+> The current contract and validation are in [browser access](browser-access.md).
+> The historical review below predates this additive authentication flow.
+
 > **Experimental native adapter (2026-10-19).** The active `rusty_ytdl`
 > adapter removes the Python yt-dlp/Deno subprocess dependency. The existing
 > Rust `SafeHttpClient` validates and pins media-transfer destinations, but the

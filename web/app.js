@@ -36,7 +36,7 @@
     selection: $("confirm-selection"), jobId: $("job-id"), retry: $("retry-button"),
     checkJob: $("check-job-button"), cancelRecovery: $("cancel-recovery-button")
   };
-  const state = { token: "", url: "", configuration: null, jobId: null, jobOutstanding: false, controller: null, objectUrl: null, run: 0, busy: false, phase: "idle", view: null };
+  const state = { token: "", url: "", configuration: null, jobId: null, jobOutstanding: false, tokenFocusPending: false, controller: null, objectUrl: null, run: 0, busy: false, phase: "idle", view: null };
   const jobStatuses = new Set(["queued", "running", "completed", "failed", "cancelled"]);
   const progressStages = new Set(["extracting", "downloading", "processing", "completed"]);
   const errorCodes = new Set(["INVALID_REQUEST", "UNAUTHORIZED", "NOT_FOUND", "QUEUE_FULL", "RATE_LIMITED", "CANCELLED", "NETWORK", "DNS", "ACCESS_RESTRICTED", "UPSTREAM_RATE_LIMITED", "PLAYER_CHANGED", "UNSUPPORTED_FORMAT", "EXPIRED_URL", "DOWNLOAD_INTERRUPTED", "DOWNLOAD_TOO_LARGE", "FFMPEG_FAILED", "STORAGE", "TIMEOUT", "INTERNAL"]);
@@ -189,6 +189,8 @@
     ui.pill.dataset.stage = next;
     ui.pill.textContent = { idle: "WAITING", working: "PROCESSING", success: "READY", error: "NEEDS ATTENTION" }[next];
     state.busy = next === "working"; ui.button.disabled = state.busy || state.jobOutstanding; ui.url.disabled = state.busy;
+    for (const field of [ui.media, ui.format, ui.quality, ui.bitrate]) field.disabled = state.busy || state.jobOutstanding;
+    ui.token.disabled = state.busy; $("token-toggle").disabled = state.busy;
     ui.jobId.hidden = !uuid(state.jobId);
     ui.jobId.textContent = uuid(state.jobId) ? "Job ID · " + state.jobId : "";
     ui.cancel.hidden = true; ui.progressArea.hidden = true;
@@ -217,7 +219,8 @@
   function requireToken() {
     const value = ui.token.value;
     if (value.length < 32 || value.length > 4096 || !/^[!-~]+$/.test(value)) {
-      ui.dialog.close(); ui.access.open = true; ui.token.focus();
+      if (ui.dialog.open) { state.tokenFocusPending = true; ui.dialog.close(); }
+      ui.access.open = true; ui.token.focus();
       diagnostic("warn", "access.validation_failed", { error_kind: "validation" }, preparationContext());
       fieldError(ui.token, ui.tokenError, "Enter a token of 32–4096 visible characters, with no spaces.");
       return false;
@@ -297,11 +300,13 @@
     if (!blob.size) throw appError("The backend returned an empty file.", { error_kind: "protocol" });
     diagnostic("info", "file.transfer_completed", { bytes: blob.size });
     discardPreview(); state.objectUrl = URL.createObjectURL(blob);
-    const isAudio = job.output?.mime_type?.startsWith("audio/") || state.configuration?.type === "audio";
+    const mime = typeof job.output?.mime_type === "string" ? job.output.mime_type : "";
+    const isAudio = mime.startsWith("audio/") || state.configuration?.type === "audio";
     ui.video.hidden = isAudio; ui.audio.hidden = !isAudio;
     (isAudio ? ui.audio : ui.video).src = state.objectUrl;
     const fallback = "frame-export" + (state.configuration?.format && state.configuration.format !== "original" ? "." + state.configuration.format : "");
-    const safeName = (job.output?.filename || fallback).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100) || fallback;
+    const filename = typeof job.output?.filename === "string" ? job.output.filename : fallback;
+    const safeName = filename.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 100) || fallback;
     const extension = safeName.includes(".") ? safeName.split(".").pop() : "file";
     ui.filename.textContent = safeName;
     ui.filesize.textContent = fileSize(blob.size) + " · " + (isAudio ? "Audio" : "Video") + " file";
@@ -435,7 +440,10 @@
   $("close-dialog").addEventListener("click", () => ui.dialog.close());
   $("back-button").addEventListener("click", () => ui.dialog.close());
   ui.dialog.addEventListener("close", () => {
-    ui.iframe.removeAttribute("src"); ui.button.focus(); diagnostic("debug", "confirmation.closed", {}, preparationContext());
+    ui.iframe.removeAttribute("src");
+    if (state.tokenFocusPending) { state.tokenFocusPending = false; ui.token.focus(); }
+    else if (!state.busy) ui.button.focus();
+    diagnostic("debug", "confirmation.closed", {}, preparationContext());
     if (!state.busy && state.phase === "confirmation") step("idle", preparationContext());
   });
   ui.confirm.addEventListener("click", generate);

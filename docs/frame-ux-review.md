@@ -4,7 +4,7 @@ This is a heuristic task analysis based on the Frame design context, the v1 API 
 
 ## Inferred operator task
 
-An authorized operator wants to turn a permitted YouTube source into a file with a chosen media type, format, quality, and optional audio bitrate. They need to confirm the source before queueing work, understand whether the service is waiting, processing, or finished, and retrieve the authenticated output. If they change their mind or the service rejects a request, they need a clear way to stop or recover.
+An authorized operator wants to turn a permitted YouTube source into a file with a chosen media type, format, quality, and optional audio bitrate. They need to confirm the source before queueing work, understand whether the service is waiting, processing, or finished, and retrieve the authenticated output. They may save access for this browser, verify it works, remove it later, or re-enter a token if the saved session expires. If they change their mind or the service rejects a request, they need a clear way to stop or recover.
 
 The current controls follow the v1 request contract: video offers MP4, WebM, or the source default plus best/worst or a height ceiling; audio offers MP3, M4A, or the M4A default, with best available quality and optional 32–320 kbps bitrate. Audio omits a worst-quality choice because the active adapter does not apply that setting.
 
@@ -22,7 +22,8 @@ The current controls follow the v1 request contract: video offers MP4, WebM, or 
 - **Error prevention:** validate recognized YouTube links before opening the dialog; keep format, media type, quality, and bitrate in the request; create no job until the operator confirms; validate the returned file route against the current job ID before fetching it.
 - **Match to the operator's language:** label format and quality choices in user-facing terms while sending the API's stable values. Explain that source availability can limit output quality and that the token is a private service credential.
 - **Accessibility and resilience:** use native selects and dialog semantics, visible keyboard focus, readable light and dark themes, and a stacked narrow layout with no horizontal overflow. Honor reduced-motion preferences and tolerate invalid or unavailable theme storage.
-- **Privacy:** hold the API token in tab memory, send it only in same-origin authorization headers, and avoid including tokens, source URLs, response bodies, or signed URLs in logs.
+- **Saved access consent:** saving sends the token in a same-origin bearer request, verifies the resulting session without a bearer, then clears the input. Show “Access saved” only after a valid cookie is confirmed; if cookies are blocked, keep the token available and explain how to retry. Forget must clear the cookie and restore token entry. A development response with `saved: false` means access is ready but no cookie was saved.
+- **Privacy:** keep any unsaved token in tab memory and never put it in local storage, script-readable cookies, request bodies, URLs, or logs. The optional saved session uses an opaque, signed, `Secure`, `HttpOnly`, `SameSite=Strict` cookie scoped to `/api`; protected calls include credentials and the Frame client header. After a `401`, reopen access entry and preserve the outstanding job identity for recovery.
 
 ## Regression scenarios
 
@@ -31,9 +32,12 @@ The current controls follow the v1 request contract: video offers MP4, WebM, or 
 | Review before export | Real browser shows the native confirmation dialog; no API request occurs until Continue | Confirms UI sequencing with local fixtures only |
 | Configuration | Video and audio selections produce the corresponding type, format, quality, and optional bitrate fields | Confirms the browser payload, not stream availability or extraction success |
 | Rejected access | A fixture `401` produces a persistent, safe error and no poll | Does not validate a deployed token or service |
+| Saved access | Save sends one bearer, verifies without one, reload recognizes the cookie, export requests use the cookie, and Forget clears it | Browser cookie fixtures do not establish server key rotation or deployment policy |
+| Cookie failure | A missing/invalid cookie stays unsaved; blocked cookie storage retains token input; a protected `401` allows re-entry with the original job ID | Fixtures cannot reproduce every browser privacy extension or enterprise policy |
+| Development access | `saved: false` displays “Access ready” without claiming a persistent cookie | Depends on the service's development-mode response contract |
 | Cancellation | Confirmed job receives `DELETE`, pending poll is aborted, and no further status request is made | Does not establish worker cancellation timing |
 | Returned file URL | Only the current job's exact relative file route is fetched; the same Blob backs preview and download; old Blob URLs are revoked | A generated Blob fixture does not prove codec support or low memory use |
 | Keyboard and responsive layout | Enter opens review, Escape closes it without creating work, Enter confirms, and a narrow viewport stacks panels without horizontal overflow | Browser viewport checks do not cover every assistive technology or device |
 | Theme handling | Valid light/dark choices toggle and persist; an invalid saved value falls back safely | Does not test every operating-system theme preference |
 
-The offline browser workflow can be run with `node tests/frontend/browser.mjs` where Playwright and system Chromium are installed. The Node VM suite covers workflow, diagnostics, and security-sensitive edge cases. These fixtures establish local browser behavior only; they do not establish YouTube access, playback, deployed authentication, remote-worker behavior, or Railway reliability.
+The offline browser workflow can be run with `node tests/frontend/browser.mjs` where Playwright and system Chromium are installed. It uses routed responses to verify cookie flags, reload, removal, blocked storage, and recovery. The Node VM suite covers workflow, diagnostics, and security-sensitive edge cases. These fixtures establish local browser behavior only; they do not establish YouTube access, playback, deployed authentication, remote-worker behavior, or Railway reliability.

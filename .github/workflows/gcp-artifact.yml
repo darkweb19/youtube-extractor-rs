@@ -5,6 +5,7 @@ on:
     branches: [main, fix/rust-yt-bot]
     paths:
       - 'src/**'
+      - 'web/**'
       - 'gcp-worker/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -28,6 +29,8 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
+      - name: Install media test dependencies
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends ffmpeg
       - name: Validate GCP scripts
         run: bash -n gcp-worker/*.sh
       - name: Run Rust regression tests

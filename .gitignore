@@ -9,3 +9,6 @@ __pycache__/
 /data/
 *.part
 *.log
+
+# Generated short-lived credentials from GitHub OIDC auth
+gha-creds-*.json

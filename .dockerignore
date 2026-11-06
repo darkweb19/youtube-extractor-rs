@@ -9,3 +9,6 @@ data
 *.log
 *.part
 attachments
+
+# Generated short-lived credentials from GitHub OIDC auth
+gha-creds-*.json

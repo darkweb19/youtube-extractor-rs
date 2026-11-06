@@ -19,6 +19,8 @@ jobs:
       - name: Install deterministic media-test prerequisites
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends ffmpeg
       - uses: Swatinem/rust-cache@v2
+      - name: Validate GCP deployment shell scripts
+        run: bash -n gcp-worker/*.sh
       - name: Validate frontend JavaScript syntax
         run: node --check web/app.js
       - name: Test frontend workflow and private diagnostics

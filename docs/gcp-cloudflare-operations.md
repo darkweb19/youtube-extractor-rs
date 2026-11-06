@@ -48,8 +48,9 @@ API bodies, private resource details or credentials in public errors.
 
 ## Install and protect the VM worker
 
-Follow the [prebuilt ZIP procedure](../gcp-worker/README.md#browser-only-deployment-no-git-docker-or-rust-required-locally)
-for the intended commit. The artifact workflow builds for Ubuntu 24.04 amd64;
+Prefer the [automated boot-time deployment](automated-gcp-deployment.md)
+for the intended reviewed main commit. Keep the prebuilt ZIP in
+[gcp-worker/README.md](../gcp-worker/README.md) as a manual recovery option. The artifact workflow builds for Ubuntu 24.04 amd64;
 its archive includes the binary, installer scripts, service unit and example
 configuration. Check the workflow provenance/commit before downloading and run
 `sha256sum -c SHA256SUMS` after upload. The current checksum file covers the

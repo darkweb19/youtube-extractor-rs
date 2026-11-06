@@ -1,25 +1,37 @@
-name: GCP Worker - Prebuilt ZIP
+name: GCP Worker - Build and Deploy
+
 on:
   push:
-    branches: [fix/rust-yt-bot]
+    branches: [main, fix/rust-yt-bot]
+    paths:
+      - 'src/**'
+      - 'gcp-worker/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/gcp-artifact.yml'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: gcp-bundle-${{ github.ref }}
+  group: gcp-worker-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   package:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
         run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
+      - name: Validate GCP scripts
+        run: bash -n gcp-worker/*.sh
+      - name: Run Rust regression tests
+        run: cargo test --locked --all-targets
       - name: Compile Linux amd64 worker
         run: cargo build --locked --release --bin youtube-extractor
       - name: Assemble GCP-only bundle
@@ -34,8 +46,7 @@ jobs:
           install -m 0644 gcp-worker/worker.env.example gcp-worker/bundle/worker.env.example
           (cd gcp-worker/bundle && sha256sum youtube-extractor > SHA256SUMS)
           file gcp-worker/bundle/youtube-extractor
-          bash -n gcp-worker/bundle/setup-ubuntu.sh gcp-worker/bundle/install-service.sh
-      - name: Publish prebuilt worker ZIP
+      - name: Publish prebuilt worker ZIP for manual recovery
         uses: actions/upload-artifact@v4
         with:
           name: gcp-worker-ubuntu24-amd64
@@ -43,3 +54,68 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 6
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: gcp-worker-production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_DEPLOY_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      GCP_WORKER_BUCKET: ${{ vars.GCP_WORKER_BUCKET }}
+      GCP_VM_ZONE: ${{ vars.GCP_VM_ZONE }}
+      GCP_VM_NAME: ${{ vars.GCP_VM_NAME }}
+      GCP_WORKER_ENV_SECRET: ${{ vars.GCP_WORKER_ENV_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Retrieve tested worker bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: gcp-worker-ubuntu24-amd64
+          path: gcp-worker/bundle
+      - name: Validate required deployment variables
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in GCP_PROJECT_ID GCP_WORKLOAD_IDENTITY_PROVIDER GCP_DEPLOY_SERVICE_ACCOUNT GCP_WORKER_BUCKET GCP_VM_ZONE GCP_VM_NAME; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing GitHub Actions variable $name"
+              exit 1
+            fi
+          done
+      - name: Authenticate via Workload Identity Federation
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Publish immutable release and update the VM boot configuration
+        shell: bash
+        env:
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          tar -C gcp-worker/bundle -czf worker-bundle.tar.gz .
+          digest="$(sha256sum worker-bundle.tar.gz | awk '{print $1}')"
+          printf '{"commit":"%s","sha256":"%s"}\n' "$RELEASE_COMMIT" "$digest" > latest.json
+
+          # The mutable pointer is published last so readers never see an
+          # incomplete release. No service restart is triggered while jobs run.
+          gcloud storage cp worker-bundle.tar.gz             "gs://$GCP_WORKER_BUCKET/releases/$RELEASE_COMMIT/bundle.tar.gz"
+          gcloud storage cp gcp-worker/bootstrap.sh             "gs://$GCP_WORKER_BUCKET/bootstrap.sh"
+
+          metadata="gcp-worker-bucket=$GCP_WORKER_BUCKET,startup-script-url=gs://$GCP_WORKER_BUCKET/bootstrap.sh"
+          if [[ -n "$GCP_WORKER_ENV_SECRET" ]]; then
+            metadata="$metadata,gcp-worker-env-secret=$GCP_WORKER_ENV_SECRET"
+          fi
+          gcloud compute instances add-metadata "$GCP_VM_NAME"             --project "$GCP_PROJECT_ID" --zone "$GCP_VM_ZONE"             --metadata "$metadata"
+
+          gcloud storage cp latest.json "gs://$GCP_WORKER_BUCKET/latest.json"
+          echo "Published $RELEASE_COMMIT. The VM will install it on its next boot."

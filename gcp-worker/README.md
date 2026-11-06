@@ -10,14 +10,22 @@ service as a binary instead of maintaining a fork of its request parsing,
 job queue, cancellation, or file streaming code. GCP receives only the generated
 `gcp-worker/bundle/` folder; Railway keeps the UI and public API.
 
-## Browser-only deployment (no Git, Docker or Rust required locally)
+## Manual recovery via prebuilt ZIP (automated deployment preferred)
 
-GitHub Actions compiles and packages the worker for **Ubuntu 24.04 amd64**.
-You do not need Git, Docker, `cargo`, or `gcloud` on your computer or the VM.
+The preferred process is now **automatic**: a reviewed push to `main`
+creates a private Cloud Storage release, and the worker installs it on its
+**next VM boot**, with no binary download, browser SSH upload or manual service
+restart. See the [automated GCP deployment guide](../docs/automated-gcp-deployment.md)
+for one-time IAM/instance metadata configuration, verification and rollback.
+Existing worker environment and Tunnel settings are preserved.
+
+The ZIP below is retained as a **manual recovery path**. GitHub Actions
+compiles and packages the worker for **Ubuntu 24.04 amd64**. You do not need
+Git, Docker, `cargo`, or `gcloud` on your computer or the VM.
 
 1. Open [Actions](https://github.com/darkweb19/youtube-extractor-rs/actions/workflows/gcp-artifact.yml)
-   on branch `fix/rust-yt-bot`. Open the most recent successful
-   **GCP Worker - Prebuilt ZIP** run. The workflow runs on each branch push.
+   on the intended branch/commit. Open a successful
+   **GCP Worker - Build and Deploy** run; builds run on selected main or feature branch pushes.
 2. Under **Artifacts**, download `gcp-worker-ubuntu24-amd64`.
    Your browser downloads `gcp-worker-ubuntu24-amd64.zip`.
 3. In Google Cloud Console > Compute Engine > VM instances, click **SSH** for
